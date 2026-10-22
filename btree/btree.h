@@ -1857,17 +1857,13 @@ private:
 		big_,
 		small_> key_compare_checker(R);
 
-	// A never instantiated helper function that returns the key comparison
-	// functor.
-	static key_compare key_compare_helper();
-
 	// Verify that key_compare returns a bool. This is similar to the way
 	// is_convertible in base/type_traits.h works. Note that key_compare_checker
 	// is never actually invoked. The compiler will select which
 	// key_compare_checker() to instantiate and then figure out the size of the
 	// return type of key_compare_checker() at compile time which we then check
 	// against the sizeof of big_.
-	static_assert(sizeof(key_compare_checker(key_compare_helper()(key_type(), key_type()))) == sizeof(big_),
+	static_assert(sizeof(key_compare_checker(std::declval<const key_compare&>()(std::declval<const key_type&>(), std::declval<const key_type&>()))) == sizeof(big_),
 		"key_comparison_function_must_return_bool");
 
 	// Note: We insist on kTargetValues, which is computed from

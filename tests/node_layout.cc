@@ -221,6 +221,29 @@ void range_insert_family() {
 			std::equal(constructed.begin(), constructed.end(), constructed_expected.begin()));
 	}
 }
+struct ExplicitKey {
+	ExplicitKey() = delete;
+	explicit ExplicitKey(int input) : value(input) {}
+	int value;
+};
+struct ExplicitCompare {
+	ExplicitCompare() = delete;
+	explicit ExplicitCompare(int) {}
+	bool operator()(const ExplicitKey& left, const ExplicitKey& right) const {
+		return left.value < right.value;
+	}
+};
+void comparator_expression() {
+	btree::map<ExplicitKey, int, ExplicitCompare> values(ExplicitCompare(0));
+	values.insert({ExplicitKey(2), 20});
+	values.insert({ExplicitKey(1), 10});
+	values.verify();
+	require(values.find(ExplicitKey(1))->second == 10);
+	btree::set<ExplicitKey, ExplicitCompare> keys(ExplicitCompare(0));
+	keys.insert(ExplicitKey(2)); keys.insert(ExplicitKey(1));
+	keys.verify();
+	require(keys.begin()->value == 1 && keys.size() == 2);
+}
 void range_insertions() {
 	range_insert_family<btree::map<int, int>, std::map<int, int>>();
 	range_insert_family<btree::multimap<int, int>, std::multimap<int, int>>();
@@ -253,7 +276,7 @@ int main(int argc, char** argv) {
 		} else {
 			require(argc == 1);
 			short_root_lifetime(); compact_roots(); unpadded_leaf_extents(); move_only_values();
-			aligned_slots(); allocation_failure(); rejected_alignment(); ordered_model(); range_insertions();
+			aligned_slots(); allocation_failure(); rejected_alignment(); ordered_model(); range_insertions(); comparator_expression();
 		}
 	}
 	catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

@@ -23,3 +23,7 @@ Preserve the old revision as the benchmark arm for allocation counts, peak reque
 ## Range insertion
 
 Range insertion reacquires its end hint after each mutation. This preserves iterator invalidation rules across first insertion, compact-root growth and splits. Coverage compares all four container families with standard ordered containers for empty and populated destinations, duplicate input, range construction and initializer-list insertion.
+
+## Comparator checking
+
+Return-type checking uses unevaluated const references, matching lookup. Explicitly constructed keys and comparators need no default constructor for this check; the bool versus tagged compare-to return contract remains unchanged. This changes no node storage or runtime comparator mechanism.
