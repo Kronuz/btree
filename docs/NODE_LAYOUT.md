@@ -19,3 +19,7 @@ The public container operations do not change. Node internals require a complete
 The counting-allocator test checks exact extents and matching deallocation, ordinary short-root capacities, unusually sized values, over-aligned values and allocation failure. Nontrivial values exercise construction, movement and destruction through splitting, merging and root collapse. Run it with sanitizer recovery disabled, then run the existing mixed-mode tests and downstream applications.
 
 Preserve the old revision as the benchmark arm for allocation counts, peak requested bytes and mutation CPU. Compare identical keys, mapped values, insertion/erasure schedules and build flags. Treat an exact footprint change for formerly padded leaves or newly aligned storage separately from timing variation. No performance result follows from source inspection alone.
+
+## Range insertion
+
+Range insertion reacquires its end hint after each mutation. This preserves iterator invalidation rules across first insertion, compact-root growth and splits. Coverage compares all four container families with standard ordered containers for empty and populated destinations, duplicate input, range construction and initializer-list insertion.

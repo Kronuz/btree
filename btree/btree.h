@@ -3122,8 +3122,8 @@ public:
 	}
 	template <typename InputIterator>
 	void insert(InputIterator f, InputIterator l) {
-		for (const_iterator end = this->cend(); f != l; ++f) {
-			insert(end, *f);
+		for (; f != l; ++f) {
+			insert(this->cend(), *f);
 		}
 	}
 
@@ -3227,8 +3227,8 @@ class btree_multi_container : public btree_container<Tree> {
 	}
 	template <typename InputIterator>
 	void insert(InputIterator f, InputIterator l) {
-		for (const_iterator end = this->cend(); f != l; ++f) {
-			insert(end, *f);
+		for (; f != l; ++f) {
+			insert(this->cend(), *f);
 		}
 	}
 	void insert(std::initializer_list<value_type> il) {

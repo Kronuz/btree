@@ -73,3 +73,5 @@ Issues and pull requests are welcome.
 
 Apache 2.0. See [LICENSE](LICENSE). Copyright (c) 2013 Google Inc. and (c) 2019
 Germán Méndez Bravo.
+
+Range insertion and range construction refresh their end hint after each insertion, including root growth and splits. The compact-layout suite compares all four container families with standard ordered containers for duplicate input and populated destinations.

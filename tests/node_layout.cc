@@ -194,6 +194,45 @@ void short_root_lifetime() {
 	values.verify();
 	require(values.size() == 2);
 }
+template <typename Tree, typename Reference>
+void range_insert_family() {
+	constexpr bool is_set = std::is_same<typename Tree::key_type, typename Tree::value_type>::value;
+	for (bool populated : {false, true}) for (bool reversed : {false, true}) {
+		Tree values;
+		Reference expected;
+		if (populated) {
+			if constexpr (is_set) { values.insert(-1); expected.insert(-1); }
+			else { values.insert(typename Tree::value_type{-1, -1}); expected.emplace(-1, -1); }
+		}
+		std::vector<typename Tree::value_type> input;
+		for (int i = 0; i < 128; ++i) {
+			const int key = ((reversed ? 127 - i : i) * 37) % 61;
+			if constexpr (is_set) input.emplace_back(key);
+			else input.emplace_back(key, i);
+		}
+		values.insert(input.cbegin(), input.cend());
+		expected.insert(input.cbegin(), input.cend());
+		values.verify();
+		require(values.size() == expected.size() && std::equal(values.begin(), values.end(), expected.begin()));
+		Tree constructed(input.cbegin(), input.cend());
+		Reference constructed_expected(input.cbegin(), input.cend());
+		constructed.verify();
+		require(constructed.size() == constructed_expected.size() &&
+			std::equal(constructed.begin(), constructed.end(), constructed_expected.begin()));
+	}
+}
+void range_insertions() {
+	range_insert_family<btree::map<int, int>, std::map<int, int>>();
+	range_insert_family<btree::multimap<int, int>, std::multimap<int, int>>();
+	range_insert_family<btree::set<int>, std::set<int>>();
+	range_insert_family<btree::multiset<int>, std::multiset<int>>();
+	btree::map<int, int> unique_map; unique_map.insert({{2, 2}, {1, 1}, {3, 3}});
+	btree::multimap<int, int> multi_map; multi_map.insert({{2, 2}, {1, 1}, {2, 3}});
+	btree::set<int> unique_set; unique_set.insert({2, 1, 3});
+	btree::multiset<int> multi_set; multi_set.insert({2, 1, 2});
+	unique_map.verify(); multi_map.verify(); unique_set.verify(); multi_set.verify();
+	require(unique_map.size() == 3 && multi_map.size() == 3 && unique_set.size() == 3 && multi_set.size() == 3);
+}
 void ordered_model() {
 	btree::set<int> values;
 	std::set<int> expected;
@@ -214,7 +253,7 @@ int main(int argc, char** argv) {
 		} else {
 			require(argc == 1);
 			short_root_lifetime(); compact_roots(); unpadded_leaf_extents(); move_only_values();
-			aligned_slots(); allocation_failure(); rejected_alignment(); ordered_model();
+			aligned_slots(); allocation_failure(); rejected_alignment(); ordered_model(); range_insertions();
 		}
 	}
 	catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
