@@ -1761,6 +1761,8 @@ private:
 	// key(v) <= iter.key() and (--iter).key() <= key(v).
 	template <typename... Args>
 	iterator internal_emplace(const_iterator hint, Args&&... args);
+	template <typename... Args>
+	iterator emplace_empty(Args&&... args);
 
 	// Returns an iterator pointing to the first value >= the value "iter" is
 	// pointing at. Note that "iter" might be pointing to an invalid location as
@@ -2229,7 +2231,7 @@ template <typename P> template <typename... Args>
 std::pair<typename btree<P>::iterator, bool>
 btree<P>::emplace_unique_key_args(const key_type& key, Args&&... args) {
 	if (empty()) {
-		__root() = new_leaf_root_node(1);
+		return std::make_pair(emplace_empty(std::forward<Args>(args)...), true);
 	}
 
 	std::pair<iterator, int> res = internal_locate(key, iterator(root(), 0));
@@ -2277,7 +2279,7 @@ template <typename P> template <typename... Args>
 typename btree<P>::iterator
 btree<P>::emplace_multi_key_args(const key_type& key, Args&&... args) {
 	if (empty()) {
-		__root() = new_leaf_root_node(1);
+		return emplace_empty(std::forward<Args>(args)...);
 	}
 
 	iterator iter = internal_upper_bound(key, iterator(root(), 0));
@@ -2659,6 +2661,20 @@ inline IterType btree<P>::internal_last(IterType iter) {
 		}
 	}
 	return iter;
+}
+
+template <typename P> template <typename... Args>
+inline typename btree<P>::iterator
+btree<P>::emplace_empty(Args&&... args) {
+	auto* node = new_leaf_root_node(1);
+	try {
+		node->insert_value(0, std::forward<Args>(args)...);
+	} catch (...) {
+		delete_leaf_node(node);
+		throw;
+	}
+	__root() = node;
+	return iterator(node, 0);
 }
 
 template <typename P> template <typename... Args>

@@ -27,3 +27,7 @@ Range insertion reacquires its end hint after each mutation. This preserves iter
 ## Comparator checking
 
 Return-type checking uses unevaluated const references, matching lookup. Explicitly constructed keys and comparators need no default constructor for this check; the bool versus tagged compare-to return contract remains unchanged. This changes no node storage or runtime comparator mechanism.
+
+## First-root publication
+
+The first value is constructed in an unpublished one-slot leaf. A failed construction frees that leaf while the container retains a null root. Successful construction publishes the root without a key search or comparator copy; other insertion paths are unchanged.

@@ -221,6 +221,72 @@ void range_insert_family() {
 			std::equal(constructed.begin(), constructed.end(), constructed_expected.begin()));
 	}
 }
+struct FirstValue {
+	inline static bool refuse_copy = false;
+	inline static int live = 0;
+	int value;
+	explicit FirstValue(int input) : value(input) { ++live; }
+	FirstValue(const FirstValue& other) : value(other.value) {
+		if (refuse_copy) throw std::runtime_error("first value copy");
+		++live;
+	}
+	FirstValue(FirstValue&& other) noexcept : value(other.value) { ++live; }
+	FirstValue& operator=(FirstValue&&) = default;
+	~FirstValue() { --live; }
+	bool operator<(const FirstValue& other) const { return value < other.value; }
+};
+struct RefusingCompare {
+	inline static bool refuse_copy = false;
+	RefusingCompare() = default;
+	RefusingCompare(const RefusingCompare&) {
+		if (refuse_copy) throw std::runtime_error("first comparator copy");
+	}
+	bool operator()(int left, int right) const { return left < right; }
+};
+template <typename Tree>
+void empty_insert_without_comparison() {
+	Tree values;
+	RefusingCompare::refuse_copy = true;
+	if constexpr (std::is_same<typename Tree::key_type, typename Tree::value_type>::value) values.insert(1);
+	else values.insert(typename Tree::value_type{1, 1});
+	RefusingCompare::refuse_copy = false;
+	values.verify(); require(values.size() == 1);
+}
+template <typename Tree>
+void empty_insert_failures() {
+	auto state = std::make_shared<Allocations>();
+	Tree values(typename Tree::key_compare{}, typename Tree::allocator_type{state});
+	auto incoming = [] {
+		if constexpr (std::is_same<typename Tree::key_type, typename Tree::value_type>::value)
+			return typename Tree::value_type(1);
+		else return typename Tree::value_type(1, FirstValue(1));
+	}();
+	for (bool allocation_failure : {true, false}) {
+		state->fail = allocation_failure;
+		FirstValue::refuse_copy = !allocation_failure;
+		bool refused = false;
+		try { values.insert(incoming); }
+		catch (const std::bad_alloc&) { require(allocation_failure); refused = true; }
+		catch (const std::runtime_error&) { require(!allocation_failure); refused = true; }
+		state->fail = false; FirstValue::refuse_copy = false;
+		require(refused && values.empty() && values.size() == 0 && state->live.empty());
+		values.verify();
+	}
+	values.insert(incoming); values.verify(); require(values.size() == 1);
+	values.clear(); require(state->live.empty());
+}
+void first_insert_cleanup() {
+	empty_insert_without_comparison<btree::map<int, int, RefusingCompare>>();
+	empty_insert_without_comparison<btree::multimap<int, int, RefusingCompare>>();
+	empty_insert_without_comparison<btree::set<int, RefusingCompare>>();
+	empty_insert_without_comparison<btree::multiset<int, RefusingCompare>>();
+	using Pair = std::pair<const int, FirstValue>;
+	empty_insert_failures<btree::map<int, FirstValue, std::less<int>, CountingAllocator<Pair>>>();
+	empty_insert_failures<btree::multimap<int, FirstValue, std::less<int>, CountingAllocator<Pair>>>();
+	empty_insert_failures<btree::set<FirstValue, std::less<FirstValue>, CountingAllocator<FirstValue>>>();
+	empty_insert_failures<btree::multiset<FirstValue, std::less<FirstValue>, CountingAllocator<FirstValue>>>();
+	require(FirstValue::live == 0);
+}
 struct ExplicitKey {
 	ExplicitKey() = delete;
 	explicit ExplicitKey(int input) : value(input) {}
@@ -276,7 +342,7 @@ int main(int argc, char** argv) {
 		} else {
 			require(argc == 1);
 			short_root_lifetime(); compact_roots(); unpadded_leaf_extents(); move_only_values();
-			aligned_slots(); allocation_failure(); rejected_alignment(); ordered_model(); range_insertions(); comparator_expression();
+			aligned_slots(); allocation_failure(); rejected_alignment(); ordered_model(); range_insertions(); comparator_expression(); first_insert_cleanup();
 		}
 	}
 	catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

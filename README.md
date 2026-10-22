@@ -77,3 +77,5 @@ Germán Méndez Bravo.
 Range insertion and range construction refresh their end hint after each insertion, including root growth and splits. The compact-layout suite compares all four container families with standard ordered containers for duplicate input and populated destinations.
 
 Comparator return-type checking uses const references and does not require a default-constructible key. Comparators still return `bool`, or `int` when using the compare-to tag.
+
+First insertion publishes its root only after constructing the value. Allocation or value-construction failure leaves a reusable empty container. This narrow guarantee does not extend to all later split or rebalance failures.
