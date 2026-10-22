@@ -37,3 +37,9 @@ The first value is constructed in an unpublished one-slot leaf. A failed constru
 Copy construction builds each value once in a compact ordered shape, with O(height) planning storage. Single-leaf copies use a stack plan through the same builder. Completed children and constructed value prefixes have independent guards; cleanup uses exact leaf/internal/root allocation extents without interpreting an unpublished root sentinel. Copies preserve duplicate order and alignment.
 
 Copy failure releases all newly owned nodes and values while preserving the source. Assignment clears with the previous allocator, then follows the established comparator/allocator propagation convention. Failed value construction leaves an empty destination; preserving its previous contents is not promised. This repair does not change general insertion, erase or const-key mutation behavior.
+
+## Guarded compact-root growth
+
+A full compact leaf root grows into one unpublished geometric-capacity replacement. Construct incoming arguments first at their final position to preserve contained lvalue aliases. A separate incoming flag covers that slot until the contiguous constructed prefix reaches it. Original values use `move_if_noexcept`; failure destroys any disjoint incoming value, the counted prefix and the exact replacement extent. Publish only after all values exist, then destroy the original root.
+
+Copyable values retain contents on failure when copied, and nonthrowing moves leave no later fallible transfer. Throwing move-only mapped values may remain moved-from with keys and topology valid. If a noncopyable set-key move is attempted and fails, clean the replacement then clear the original set canonically. Explicit contained mapped moves can consume their source; moving contained set keys is unsupported. This branch uses actual const-key values and no swaps, planner or scratch allocation; full-node splitting, nonfull insertion and erase are unchanged.

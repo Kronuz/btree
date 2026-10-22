@@ -480,6 +480,163 @@ void aligned_and_duplicate_copies() {
 	}
 	require(state->live.empty() && state->bytes == 0);
 }
+struct RootOrder {
+	bool reverse = false;
+	bool operator()(int left, int right) const { return reverse ? left > right : left < right; }
+};
+void root_growth_failures() {
+	using Pair = std::pair<const int, ThrowingValue>;
+	using Tree = btree::map<int, ThrowingValue, RootOrder, CountingAllocator<Pair>>;
+	using Params = btree::btree_map_params<int, ThrowingValue, RootOrder, CountingAllocator<Pair>, 256>;
+	constexpr int capacity = btree::btree_node<Params>::kNodeValues;
+	for (bool reverse : {false, true}) for (int count = 1; count < capacity; count = std::min(capacity, count * 2)) {
+		for (int position = 0; position <= count; ++position) {
+			auto state = std::make_shared<Allocations>();
+			{
+				Tree values(RootOrder{reverse}, CountingAllocator<Pair>{state});
+				for (int key = 0; key < count; ++key) values.try_emplace(key * 2, key * 2);
+				const int key = (reverse ? count - position : position) * 2 - 1;
+				ThrowingValue incoming(key);
+				const auto objects = ThrowingValue::live;
+				const auto bytes = state->bytes;
+				const auto nodes = state->live.size();
+				std::vector<std::pair<int, int>> original;
+				for (const auto& value : values) original.emplace_back(value.first, value.second.value);
+				auto unchanged = [&] {
+					require(values.size() == static_cast<std::size_t>(count));
+					auto expected = original.begin();
+					for (const auto& value : values) {
+						require(value.first == expected->first && value.second.value == expected->second); ++expected;
+					}
+					require(ThrowingValue::live == objects && state->bytes == bytes && state->live.size() == nodes);
+					values.verify();
+				};
+				state->remaining = 0;
+				bool allocation_refused = false;
+				try { values.try_emplace(key, incoming); } catch (const std::bad_alloc&) { allocation_refused = true; }
+				state->remaining = -1;
+				require(allocation_refused); unchanged();
+				for (int budget = 0; budget <= count + 1; ++budget) {
+					ThrowingValue::remaining = budget;
+					bool refused = false;
+					try { values.try_emplace(key, incoming); }
+					catch (const std::runtime_error& error) {
+						if (std::string_view(error.what()) != "positioned value copy") throw;
+						refused = true;
+					}
+					ThrowingValue::remaining = -1;
+					require(refused == (budget < count + 1));
+					if (refused) unchanged();
+				}
+				values.verify(); require(values.size() == static_cast<std::size_t>(count + 1));
+				require(values.find(key)->second.value == key);
+			}
+			require(state->live.empty() && state->bytes == 0 && ThrowingValue::live.empty());
+		}
+	}
+}
+struct RootIncoming {
+	inline static bool refuse = false;
+	inline static int moves = 0;
+	int value;
+	explicit RootIncoming(int number) : value(number) {
+		if (refuse) throw std::runtime_error("incoming refused");
+	}
+	RootIncoming(const RootIncoming&) = default;
+	RootIncoming& operator=(const RootIncoming&) = default;
+	RootIncoming(RootIncoming&& other) noexcept : value(other.value) { other.value = -1; ++moves; }
+	RootIncoming& operator=(RootIncoming&&) = default;
+};
+void root_growth_aliases() {
+	for (int key : {-1, 1}) {
+		btree::map<int, std::string> values;
+		values.try_emplace(0, std::string(80, 'x'));
+		values.try_emplace(key, values.begin()->second);
+		values.verify(); require(values.size() == 2);
+		require(values.at(0) == std::string(80, 'x') && values.at(key) == std::string(80, 'x'));
+		btree::map<int, std::string> moved;
+		moved.try_emplace(0, std::string(80, 'x'));
+		moved.try_emplace(key, std::move(moved.begin()->second));
+		moved.verify(); require(moved.at(key) == std::string(80, 'x'));
+	}
+	btree::map<int, RootIncoming> values;
+	values.try_emplace(0, 10);
+	RootIncoming::moves = 0; RootIncoming::refuse = true;
+	bool refused = false;
+	try { values.try_emplace(1, 20); } catch (const std::runtime_error&) { refused = true; }
+	RootIncoming::refuse = false;
+	require(refused && RootIncoming::moves == 0 && values.size() == 1 && values.at(0).value == 10);
+	values.verify(); values.try_emplace(1, 20); values.verify();
+	btree::multimap<int, int> multiple;
+	for (int number = 0; number < 16; ++number) multiple.insert({3, number});
+	multiple.verify(); int number = 0;
+	for (const auto& value : multiple) require(value.first == 3 && value.second == number++);
+}
+struct RootMoveKey {
+	inline static int live = 0, budget = -1;
+	int value;
+	explicit RootMoveKey(int number) : value(number) { ++live; }
+	RootMoveKey(const RootMoveKey&) = delete;
+	RootMoveKey(RootMoveKey&& other) : value(other.value) {
+		other.value = -1;
+		if (budget == 0) throw std::runtime_error("key move refused");
+		if (budget > 0) --budget;
+		++live;
+	}
+	RootMoveKey& operator=(RootMoveKey&& other) {
+		value = other.value; other.value = -1;
+		if (budget == 0) throw std::runtime_error("key move refused");
+		if (budget > 0) --budget;
+		return *this;
+	}
+	~RootMoveKey() { --live; }
+	bool operator<(const RootMoveKey& other) const { return value < other.value; }
+};
+void root_growth_move_only_recovery() {
+	for (int count : {1, 2, 4}) for (int position = 0; position <= count; ++position) {
+		for (int budget = 0; budget <= count + 1; ++budget) {
+			{
+				btree::set<RootMoveKey> values;
+				for (int index = 0; index < count; ++index) values.insert(RootMoveKey((index + 1) * 4));
+				RootMoveKey incoming((position + 1) * 4 - 2);
+				RootMoveKey::budget = budget;
+				bool refused = false;
+				try { values.insert(std::move(incoming)); } catch (const std::runtime_error&) { refused = true; }
+				RootMoveKey::budget = -1;
+				require(refused == (budget <= count));
+				if (!refused) require(values.size() == static_cast<std::size_t>(count + 1));
+				else if (budget == 0) {
+					require(values.size() == static_cast<std::size_t>(count));
+					int index = 0;
+					for (const auto& value : values) require(value.value == ++index * 4);
+				} else require(values.empty());
+				values.verify(); values.insert(RootMoveKey(999)); values.verify();
+			}
+			require(RootMoveKey::live == 0);
+		}
+	}
+}
+void root_growth_move_only_mapped() {
+	using Pair = std::pair<const int, RootMoveKey>;
+	using Tree = btree::map<int, RootMoveKey, std::less<int>, CountingAllocator<Pair>>;
+	for (int key : {-1, 1}) {
+		auto state = std::make_shared<Allocations>();
+		{
+			Tree values(std::less<int>{}, CountingAllocator<Pair>{state});
+			values.try_emplace(0, 5);
+			const auto bytes = state->bytes;
+			RootMoveKey::budget = 0;
+			bool refused = false;
+			try { values.try_emplace(key, 7); } catch (const std::runtime_error&) { refused = true; }
+			RootMoveKey::budget = -1;
+			require(refused && values.size() == 1 && values.begin()->first == 0);
+			require(values.begin()->second.value == -1 && RootMoveKey::live == 1);
+			require(state->bytes == bytes && state->live.size() == 1);
+			values.verify(); values.try_emplace(key, 9); values.verify();
+		}
+		require(state->live.empty() && state->bytes == 0 && RootMoveKey::live == 0);
+	}
+}
 struct FirstValue {
 	inline static bool refuse_copy = false;
 	inline static int live = 0;
@@ -605,6 +762,7 @@ int main(int argc, char** argv) {
 			compact_copy_boundaries(); copy_failure_positions(); compact_copy_history();
 			assignment_allocation_failure_positions(); assignment_failure_positions();
 			nested_copy_failure_positions(); aligned_and_duplicate_copies();
+			root_growth_failures(); root_growth_aliases(); root_growth_move_only_recovery(); root_growth_move_only_mapped();
 		}
 	}
 	catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

@@ -83,3 +83,5 @@ First insertion publishes its root only after constructing the value. Allocation
 Copies construct a compact ordered shape without key comparisons and release every completed value and node on failure, including nested containers. Copy assignment retains clear-then-copy behavior: a failed copy leaves the destination empty, and does not preserve its prior contents. Other mutation failure guarantees are unchanged.
 
 Known limitation: nested containers with non-default-constructible allocators can fail constructor-trait instantiation under Clang with libstdc++ 13 in C++20. The ordered-copy repair does not change constructor constraints; this remains a separate compatibility issue.
+
+Compact leaf-root growth constructs the incoming value first in its final replacement slot, then relocates existing values under counted ownership. Failed copying leaves original contents intact; throwing move-only mapped values can remain moved-from. After a destructive move of a noncopyable set key fails, the set becomes empty and reusable. Explicit moves from contained mapped arguments may consume them. Other insertion and erase paths retain their existing limitations.
