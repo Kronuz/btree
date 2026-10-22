@@ -31,3 +31,9 @@ Return-type checking uses unevaluated const references, matching lookup. Explici
 ## First-root publication
 
 The first value is constructed in an unpublished one-slot leaf. A failed construction frees that leaf while the container retains a null root. Successful construction publishes the root without a key search or comparator copy; other insertion paths are unchanged.
+
+## Ordered copy ownership
+
+Copy construction builds each value once in a compact ordered shape, with O(height) planning storage. Single-leaf copies use a stack plan through the same builder. Completed children and constructed value prefixes have independent guards; cleanup uses exact leaf/internal/root allocation extents without interpreting an unpublished root sentinel. Copies preserve duplicate order and alignment.
+
+Copy failure releases all newly owned nodes and values while preserving the source. Assignment clears with the previous allocator, then follows the established comparator/allocator propagation convention. Failed value construction leaves an empty destination; preserving its previous contents is not promised. This repair does not change general insertion, erase or const-key mutation behavior.

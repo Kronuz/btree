@@ -124,6 +124,7 @@
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace btree {
 
@@ -922,7 +923,7 @@ public:
 
 	static btree_node* init_root(void* storage, btree_node* parent) {
 		btree_node* n = init_internal(storage, parent);
-		::new (static_cast<void*>(n->storage() + root_offset())) root_metadata{parent, parent->count()};
+		::new (static_cast<void*>(n->storage() + root_offset())) root_metadata{parent, parent ? parent->count() : 0};
 		return n;
 	}
 
@@ -933,6 +934,7 @@ public:
 	}
 
 private:
+	template <typename> friend class btree;
 	btree_node(btree_node* parent, int capacity)
 		: fields_{true, 0, static_cast<typename base_fields::field_type>(capacity), 0, parent} {}
 	char* storage() { return reinterpret_cast<char*>(this); }
@@ -1750,6 +1752,83 @@ private:
 	// Tries to shrink the height of the tree by 1.
 	void try_shrink();
 
+	struct copy_level {
+		size_type nodes;
+		size_type next = 0;
+	};
+	using copy_level_allocator = typename internal_allocator_traits::template rebind_alloc<copy_level>;
+	using copy_plan = std::vector<copy_level, copy_level_allocator>;
+
+	node_type* build_ordered_copy(const_iterator& source, copy_level* levels, std::size_t height,
+		size_type leaf_values, node_type* parent, bool root_node) {
+		const auto ordinal = levels[height].next++;
+		int count;
+		node_type* result;
+		if (height == 0) {
+			count = static_cast<int>(leaf_values / levels[0].nodes + (ordinal < leaf_values % levels[0].nodes));
+			int capacity = kNodeValues;
+			if (root_node) {
+				capacity = 1;
+				while (capacity < count) capacity = std::min<int>(kNodeValues, capacity * 2);
+			}
+			result = node_type::init_leaf(allocate_node(node_type::leaf_size(capacity)), parent, capacity);
+		} else {
+			const auto children = levels[height - 1].nodes;
+			count = static_cast<int>(children / levels[height].nodes +
+				(ordinal < children % levels[height].nodes)) - 1;
+			result = root_node ? node_type::init_root(allocate_node(node_type::root_size()), parent)
+				: new_internal_node(parent);
+		}
+		int children = 0;
+		try {
+			for (int i = 0; i <= count; ++i) {
+				if (height != 0) {
+					result->set_child(i, build_ordered_copy(source, levels, height - 1, leaf_values, result, false));
+					++children;
+				}
+				if (i != count) {
+					result->construct_value(i, *source);
+					result->set_count(i + 1);
+					++source;
+				}
+			}
+		} catch (...) {
+			for (int i = 0; i < children; ++i) internal_clear(result->child(i));
+			if (result->is_leaf()) delete_leaf_node(result);
+			else deallocate_node(result, root_node ? node_type::root_size() : node_type::internal_size());
+			throw;
+		}
+		return result;
+	}
+
+	node_type* copy_root(const self_type& source) {
+		const auto size = source.size();
+		if (size == 0) return nullptr;
+		const auto leaves = size / (kNodeValues + 1) + 1;
+		auto iterator = source.begin();
+		node_type* result;
+		if (leaves == 1) {
+			copy_level level{1};
+			result = build_ordered_copy(iterator, &level, 0, size, nullptr, true);
+		} else {
+			copy_plan levels{copy_level_allocator(internal_allocator())};
+			levels.push_back({leaves});
+			while (levels.back().nodes > 1)
+				levels.push_back({1 + (levels.back().nodes - 1) / (kNodeValues + 1)});
+			result = build_ordered_copy(iterator, levels.data(), levels.size() - 1, size - leaves + 1, nullptr, true);
+		}
+		auto first = result;
+		while (!first->is_leaf()) first = first->child(0);
+		result->fields_.parent = first;
+		if (!result->is_leaf()) {
+			auto last = result;
+			while (!last->is_leaf()) last = last->child(last->count());
+			result->__rightmost() = last;
+			result->__size() = size;
+		}
+		return result;
+	}
+
 	iterator internal_end(const_iterator iter) {
 		return iter.node ? iterator(iter.node, iter.position) : end();
 	}
@@ -2318,17 +2397,7 @@ void btree<P>::assign(const self_type& x) {
 	__key_comp() = x.key_comp();
 	__internal_allocator() = x.internal_allocator();
 
-	// Assignment can avoid key comparisons because we know the order of the
-	// values is the same order we'll store them in.
-	for (const_iterator iter = x.begin(); iter != x.end(); ++iter) {
-		if (empty()) {
-			emplace_multi(*iter);
-		} else {
-			// If the btree is not empty, we can just insert the new value at the end
-			// of the tree!
-			internal_emplace(end(), *iter);
-		}
-	}
+	__root() = copy_root(x);
 }
 
 template <typename P>

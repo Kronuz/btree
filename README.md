@@ -79,3 +79,7 @@ Range insertion and range construction refresh their end hint after each inserti
 Comparator return-type checking uses const references and does not require a default-constructible key. Comparators still return `bool`, or `int` when using the compare-to tag.
 
 First insertion publishes its root only after constructing the value. Allocation or value-construction failure leaves a reusable empty container. This narrow guarantee does not extend to all later split or rebalance failures.
+
+Copies construct a compact ordered shape without key comparisons and release every completed value and node on failure, including nested containers. Copy assignment retains clear-then-copy behavior: a failed copy leaves the destination empty, and does not preserve its prior contents. Other mutation failure guarantees are unchanged.
+
+Known limitation: nested containers with non-default-constructible allocators can fail constructor-trait instantiation under Clang with libstdc++ 13 in C++20. The ordered-copy repair does not change constructor constraints; this remains a separate compatibility issue.
