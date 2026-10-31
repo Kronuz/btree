@@ -1862,6 +1862,10 @@ private:
 	// Tries to shrink the height of the tree by 1.
 	void try_shrink();
 
+	// Merges or rebalances a leaf left underfull by a split whose insertion
+	// then failed, walking up the tree as erase does.
+	void repair_failed_insertion(const_iterator iter);
+
 	struct copy_level {
 		size_type nodes;
 		size_type next = 0;
@@ -2822,6 +2826,19 @@ bool btree<P>::try_merge_or_rebalance(const_iterator& iter) {
 }
 
 template <typename P>
+void btree<P>::repair_failed_insertion(const_iterator iter) {
+	while (iter.node != root() && iter.node->count() < kMinNodeValues) {
+		if (!try_merge_or_rebalance(iter)) {
+			break;
+		}
+		iter.node = iter.node->get_parent();
+	}
+	if (iter.node == root()) {
+		try_shrink();
+	}
+}
+
+template <typename P>
 void btree<P>::try_shrink() {
 	if (root()->count() > 0) {
 		return;
@@ -2975,8 +2992,19 @@ btree<P>::internal_emplace(const_iterator hint, Args&&... args) {
 			iter.node->insert_value(iter.position, std::move(incoming));
 			return iter;
 		} else {
+			// The value is built in its slot after the split. The split biases
+			// toward the insertion side and can leave that leaf empty, so a
+			// failed construction repairs it, and the size counts the value
+			// only once it exists.
 			rebalance_or_split(iter);
+			try {
+				iter.node->insert_value(iter.position, std::forward<Args>(args)...);
+			} catch (...) {
+				repair_failed_insertion(const_iterator(iter.node, iter.position));
+				throw;
+			}
 			++__size();
+			return iter;
 		}
 	}
 	iter.node->insert_value(iter.position, std::forward<Args>(args)...);

@@ -9,6 +9,7 @@
 #include "btree/map.h"
 #include "btree/set.h"
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
@@ -196,6 +197,57 @@ void iterator_erasure(unsigned count) {
 	CHECK(live_allocations == baseline);
 }
 
+// Values that are not built before the split (larger than the target node
+// size, or with a move that may throw) are constructed in the leaf after it.
+// A split biased toward the insertion side can leave that leaf empty; after a
+// refusal there the contents, size and structure stay valid, and every entry
+// erases with the heap closed.
+using Large = std::array<char, 300>;
+Large make_large(unsigned key) { Large value{}; value.fill(char('a' + key % 26)); return value; }
+struct Fragile {
+	std::string text;
+	explicit Fragile(std::string value) : text(std::move(value)) {}
+	Fragile(const Fragile&) = default;
+	Fragile(Fragile&& other) : text(std::move(other.text)) {}
+	Fragile& operator=(const Fragile&) = default;
+	Fragile& operator=(Fragile&&) = default;
+	bool operator==(const Fragile& other) const { return text == other.text; }
+};
+Fragile make_fragile(unsigned key) { return Fragile(long_key(key + 1)); }
+
+template <class Mapped>
+void late_construction_refusals(Mapped (*make)(unsigned), unsigned count) {
+	const long baseline = live_allocations;
+	unsigned refusals = 0;
+	{
+		btree::map<std::string, Mapped> tree;
+		std::map<std::string, Mapped> model;
+		for (unsigned key : schedule(count, Order::shuffled)) {
+			const auto k = long_key(key);
+			const Mapped v = make(key);
+			for (long budget = 0;; ++budget) {
+				allocation_budget = budget;
+				bool refused = false;
+				try { tree.emplace(k, v); } catch (const std::bad_alloc&) { refused = true; }
+				allocation_budget = -1;
+				if (!refused) break;
+				++refusals;
+				same_contents(tree, model);
+				CHECK(budget < 64);
+			}
+			model.emplace(k, v);
+			same_contents(tree, model);
+		}
+		for (unsigned key : schedule(count, Order::ascending)) {
+			const auto k = long_key(key);
+			erase_with_closed_heap(tree, model, [&](auto& t) { CHECK(t.erase(k) == 1); });
+		}
+		CHECK(tree.empty());
+	}
+	CHECK(live_allocations == baseline);
+	CHECK(refusals > 0);
+}
+
 // Maps with a move-only key work: keys are relocated, never copied. The
 // revert check builds the fixture against a header that cannot compile this.
 #ifndef RELOCATION_SKIP_MOVE_ONLY_KEYS
@@ -224,6 +276,9 @@ void layout_contract() {
 	static_assert(std::is_nothrow_move_constructible<Mutable>::value);
 	static_assert(std::is_nothrow_move_constructible<btree::map<std::string, std::string>>::value);
 	static_assert(std::is_same<btree::map<std::string, int>::value_type, std::pair<const std::string, int>>::value);
+	// late_construction_refusals relies on these taking the build-after-split path.
+	static_assert(sizeof(std::pair<std::string, Large>) > 256);
+	static_assert(!std::is_nothrow_move_constructible<std::pair<std::string, Fragile>>::value);
 }
 }
 
@@ -237,9 +292,13 @@ int main() {
 		set_insertion_and_erasure(order, 300);
 	}
 	iterator_erasure(300);
+	late_construction_refusals(make_large, 200);
+	late_construction_refusals(make_fragile, 200);
+	CHECK(live_allocations == start);
+	// Not counted: under clang 12 -O2 the make_unique temporaries passed to
+	// erase reach the replaced operator delete but not operator new.
 #ifndef RELOCATION_SKIP_MOVE_ONLY_KEYS
 	move_only_keys();
 #endif
-	CHECK(live_allocations == start);
 	std::puts("PASS relocation under allocation failure: unchanged after every refusal, erase allocation-free");
 }
