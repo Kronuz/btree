@@ -17,6 +17,21 @@ if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
       target_compile_options(${target} PRIVATE ${diagnostic})
     endfunction()
 
+    # Map relocation moves keys and never copies them (counted copies).
+    add_executable(key_relocation tests/key_relocation.cc)
+    btree_test_profile(key_relocation 20 -UNDEBUG)
+    add_test(NAME key_relocation COMMAND key_relocation)
+
+    # Benchmark, not built by default: cmake --build build --target string_insert_bench
+    # Only this target looks for its comparator, abseil's btree_map.
+    find_package(absl QUIET)
+    if(absl_FOUND)
+      add_executable(string_insert_bench EXCLUDE_FROM_ALL benchmarks/string_insert_bench.cc)
+      target_link_libraries(string_insert_bench PRIVATE cpp_btree::cpp_btree absl::btree)
+      target_compile_features(string_insert_bench PRIVATE cxx_std_20)
+      target_compile_options(string_insert_bench PRIVATE -O3 -DNDEBUG)
+    endif()
+
     foreach(standard IN ITEMS 17 20)
       foreach(mode IN ITEMS release debug)
         if(mode STREQUAL "release")
