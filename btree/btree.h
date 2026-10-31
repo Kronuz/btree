@@ -2887,13 +2887,17 @@ btree<P>::replace_leaf(node_type* original, int position, int capacity, Args&&..
 		for (int i = 0, source = 0; i <= original->count(); ++i) {
 			if (i == position) {
 				incoming_live = false;
-			} else {
-				// A move that may throw and has no copy fallback can consume keys.
-				if constexpr (!std::is_nothrow_move_constructible<mutable_value_type>::value &&
-						!std::is_copy_constructible<mutable_value_type>::value &&
-						!std::is_trivially_copy_constructible<key_type>::value)
-					keys_consumed = true;
+			} else if constexpr (std::is_nothrow_move_constructible<mutable_value_type>::value ||
+					std::is_copy_constructible<mutable_value_type>::value) {
 				replacement->construct_value(i, std::move_if_noexcept(original->mutable_value(source++)));
+			} else if constexpr (!std::is_same<key_type, value_type>::value && std::is_copy_constructible<key_type>::value) {
+				// A move-only mapped value whose move may throw: relocate through the
+				// const view, which copies the key, so a failure keeps every key.
+				replacement->construct_value(i, std::move(original->value(source++)));
+			} else {
+				// A throwing move with no copy fallback consumes keys.
+				keys_consumed = true;
+				replacement->construct_value(i, std::move(original->mutable_value(source++)));
 			}
 			replacement->set_count(i + 1);
 		}

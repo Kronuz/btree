@@ -750,27 +750,32 @@ void root_growth_move_only_recovery() {
 		}
 	}
 }
-void root_growth_move_only_mapped() {
-	using Pair = std::pair<const int, RootMoveKey>;
-	using Tree = btree::map<int, RootMoveKey, std::less<int>, CountingAllocator<Pair>>;
+// A throwing move-only mapped value during compact-root growth leaves every key
+// in place, with heap-allocated keys as with trivially copyable ones.
+template <typename Key>
+void root_growth_move_only_mapped(Key (*make)(int)) {
+	using Pair = std::pair<const Key, RootMoveKey>;
+	using Tree = btree::map<Key, RootMoveKey, std::less<Key>, CountingAllocator<Pair>>;
 	for (int key : {-1, 1}) {
 		auto state = std::make_shared<Allocations>();
 		{
-			Tree values(std::less<int>{}, CountingAllocator<Pair>{state});
-			values.try_emplace(0, 5);
+			Tree values(std::less<Key>{}, CountingAllocator<Pair>{state});
+			values.try_emplace(make(0), 5);
 			const auto bytes = state->bytes;
 			RootMoveKey::budget = 0;
 			bool refused = false;
-			try { values.try_emplace(key, 7); } catch (const std::runtime_error&) { refused = true; }
+			try { values.try_emplace(make(key), 7); } catch (const std::runtime_error&) { refused = true; }
 			RootMoveKey::budget = -1;
-			require(refused && values.size() == 1 && values.begin()->first == 0);
+			require(refused && values.size() == 1 && values.begin()->first == make(0));
 			require(values.begin()->second.value == -1 && RootMoveKey::live == 1);
 			require(state->bytes == bytes && state->live.size() == 1);
-			values.verify(); values.try_emplace(key, 9); values.verify();
+			values.verify(); values.try_emplace(make(key), 9); values.verify();
 		}
 		require(state->live.empty() && state->bytes == 0 && RootMoveKey::live == 0);
 	}
 }
+int int_key(int number) { return number; }
+std::string long_key(int number) { return std::string(64, 'k') + char('B' + number); }
 struct FirstValue {
 	inline static bool refuse_copy = false;
 	inline static int live = 0;
@@ -1074,7 +1079,7 @@ int main(int argc, char** argv) {
 			assignment_allocation_failure_positions(); assignment_failure_positions();
 			nested_copy_failure_positions(); aligned_and_duplicate_copies();
 			nonfull_leaf_failures(); nonfull_append_failure(); prepared_key_failures(); prepared_forwarding();
-			root_growth_failures(); root_growth_aliases(); root_growth_move_only_recovery(); root_growth_move_only_mapped();
+			root_growth_failures(); root_growth_aliases(); root_growth_move_only_recovery(); root_growth_move_only_mapped(int_key); root_growth_move_only_mapped(long_key);
 		}
 	}
 	catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
