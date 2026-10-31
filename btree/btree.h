@@ -368,8 +368,9 @@ struct btree_map_params : public btree_common_params<Key, Compare, Alloc, Target
 	typedef value_type& reference;
 	typedef const value_type& const_reference;
 
-	// Slots hold a live mutable_value_type and are read as value_type through
-	// this union, the technique used by Abseil and libc++ for const-key pairs.
+	// Each slot is a live union whose active member is the mutable pair. The
+	// tree relocates through mutable_value and hands out value, as Abseil's
+	// map_slot_type does, so no const object is ever modified.
 	union slot_type {
 		value_type value;
 		mutable_value_type mutable_value;
@@ -385,12 +386,22 @@ struct btree_map_params : public btree_common_params<Key, Compare, Alloc, Target
 		kValueSize = sizeof(Key) + sizeof(data_type),
 	};
 
-	static reference as_value(mutable_value_type& x) {
-		return reinterpret_cast<slot_type&>(x).value;
+	static reference element(slot_type& slot) { return slot.value; }
+	static const_reference element(const slot_type& slot) { return slot.value; }
+	static mutable_value_type& mutable_element(slot_type& slot) { return slot.mutable_value; }
+	static const mutable_value_type& mutable_element(const slot_type& slot) { return slot.mutable_value; }
+
+	// Begins the union's lifetime, then constructs its mutable member in place.
+	template <typename... Args>
+	static void construct(slot_type* slot, Args&&... args) {
+		slot = ::new (static_cast<void*>(slot)) slot_type;
+#if __cplusplus > 201703L
+		std::construct_at(std::addressof(slot->mutable_value), std::forward<Args>(args)...);
+#else
+		::new (static_cast<void*>(std::addressof(slot->mutable_value))) mutable_value_type(std::forward<Args>(args)...);
+#endif
 	}
-	static const_reference as_value(const mutable_value_type& x) {
-		return reinterpret_cast<const slot_type&>(x).value;
-	}
+	static void destroy(slot_type* slot) { std::destroy_at(std::addressof(slot->mutable_value)); }
 
 	static void swap(mutable_value_type& a, mutable_value_type& b) {
 		btree_swap_helper(a.first, b.first);
@@ -421,8 +432,22 @@ struct btree_set_params : public btree_common_params<Key, Compare, Alloc, Target
 		kValueSize = sizeof(Key),
 	};
 
-	static reference as_value(mutable_value_type& x) { return x; }
-	static const_reference as_value(const mutable_value_type& x) { return x; }
+	// A set slot is its key.
+	typedef Key slot_type;
+	static reference element(slot_type& slot) { return slot; }
+	static const_reference element(const slot_type& slot) { return slot; }
+	static mutable_value_type& mutable_element(slot_type& slot) { return slot; }
+	static const mutable_value_type& mutable_element(const slot_type& slot) { return slot; }
+
+	template <typename... Args>
+	static void construct(slot_type* slot, Args&&... args) {
+#if __cplusplus > 201703L
+		std::construct_at(slot, std::forward<Args>(args)...);
+#else
+		::new (static_cast<void*>(slot)) slot_type(std::forward<Args>(args)...);
+#endif
+	}
+	static void destroy(slot_type* slot) { std::destroy_at(slot); }
 
 	static void swap(mutable_value_type& a, mutable_value_type& b) {
 		btree_swap_helper(a, b);
@@ -512,6 +537,7 @@ public:
 	typedef typename Params::data_type data_type;
 	typedef typename Params::value_type value_type;
 	typedef typename Params::mutable_value_type mutable_value_type;
+	typedef typename Params::slot_type slot_type;
 	typedef typename Params::pointer pointer;
 	typedef typename Params::const_pointer const_pointer;
 	typedef typename Params::reference reference;
@@ -694,10 +720,10 @@ public:
 		return params_type::get_key(slot_value(i));
 	}
 	reference value(int i) {
-		return params_type::as_value(slot_value(i));
+		return params_type::element(*std::launder(value_slot(i)));
 	}
 	const_reference value(int i) const {
-		return params_type::as_value(slot_value(i));
+		return params_type::element(*std::launder(value_slot(i)));
 	}
 	// The live object in slot i; relocation moves from it, so keys move.
 	mutable_value_type& mutable_value(int i) {
@@ -1007,14 +1033,14 @@ private:
 		: fields_{true, 0, static_cast<typename base_fields::field_type>(capacity), 0, parent} {}
 	char* storage() { return reinterpret_cast<char*>(this); }
 	const char* storage() const { return reinterpret_cast<const char*>(this); }
-	mutable_value_type* value_slot(int i) {
-		return reinterpret_cast<mutable_value_type*>(storage() + values_offset() + std::size_t(i) * sizeof(value_type));
+	slot_type* value_slot(int i) {
+		return reinterpret_cast<slot_type*>(storage() + values_offset() + std::size_t(i) * sizeof(value_type));
 	}
-	const mutable_value_type* value_slot(int i) const {
-		return reinterpret_cast<const mutable_value_type*>(storage() + values_offset() + std::size_t(i) * sizeof(value_type));
+	const slot_type* value_slot(int i) const {
+		return reinterpret_cast<const slot_type*>(storage() + values_offset() + std::size_t(i) * sizeof(value_type));
 	}
-	mutable_value_type& slot_value(int i) { return *std::launder(value_slot(i)); }
-	const mutable_value_type& slot_value(int i) const { return *std::launder(value_slot(i)); }
+	mutable_value_type& slot_value(int i) { return params_type::mutable_element(*std::launder(value_slot(i))); }
+	const mutable_value_type& slot_value(int i) const { return params_type::mutable_element(*std::launder(value_slot(i))); }
 	btree_node** child_slot(int i) {
 		return reinterpret_cast<btree_node**>(storage() + children_offset() + std::size_t(i) * sizeof(btree_node*));
 	}
@@ -1031,12 +1057,8 @@ private:
 	}
 
 	template <typename... Args>
-	void construct_value(mutable_value_type* v, Args&&... args) {
-#if __cplusplus > 201703L
-		std::construct_at(v, std::forward<Args>(args)...);
-#else
-		new (v) mutable_value_type(std::forward<Args>(args)...);
-#endif
+	void construct_value(slot_type* v, Args&&... args) {
+		params_type::construct(v, std::forward<Args>(args)...);
 		// FIXME: The above should use allocator_traits, but allocator
 		// object is not available here at the nodes, is in the tree:
 		// allocator_type& alloc = allocator();
@@ -1050,8 +1072,8 @@ private:
 		construct_value(value_slot(i), std::forward<Args>(args)...);
 	}
 
-	void destroy_value(mutable_value_type* v) {
-		std::destroy_at(v);
+	void destroy_value(slot_type* v) {
+		params_type::destroy(v);
 		// FIXME: The above should use allocator_traits, but allocator
 		// object is not available here at the nodes, is in the tree:
 		// allocator_type& alloc = allocator();
