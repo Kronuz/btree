@@ -21,13 +21,16 @@
 #include <vector>
 
 namespace {
-long allocation_budget = -1;
-long live_allocations = 0;
-long allocation_calls = 0;
+// Shared with the replaced operators below. Volatile, because GCC 16 assumes
+// replaceable new/delete touch no global state (-fassume-sane-operators-new-delete,
+// on by default) and would otherwise cache reads and drop stores across them.
+volatile long allocation_budget = -1;
+volatile long live_allocations = 0;
+volatile long allocation_calls = 0;
 void admit_allocation() {
 	if (allocation_budget == 0) throw std::bad_alloc();
-	if (allocation_budget > 0) --allocation_budget;
-	++allocation_calls;
+	if (allocation_budget > 0) allocation_budget = allocation_budget - 1;
+	allocation_calls = allocation_calls + 1;
 }
 void check(bool condition, const char* what, int line) {
 	if (condition) return;
@@ -39,11 +42,11 @@ void check(bool condition, const char* what, int line) {
 
 void* operator new(std::size_t bytes) {
 	admit_allocation();
-	if (void* pointer = std::malloc(bytes ? bytes : 1)) { ++live_allocations; return pointer; }
+	if (void* pointer = std::malloc(bytes ? bytes : 1)) { live_allocations = live_allocations + 1; return pointer; }
 	throw std::bad_alloc();
 }
 void* operator new[](std::size_t bytes) { return ::operator new(bytes); }
-void operator delete(void* pointer) noexcept { if (pointer) { --live_allocations; std::free(pointer); } }
+void operator delete(void* pointer) noexcept { if (pointer) { live_allocations = live_allocations - 1; std::free(pointer); } }
 void operator delete[](void* pointer) noexcept { ::operator delete(pointer); }
 void operator delete(void* pointer, std::size_t) noexcept { ::operator delete(pointer); }
 void operator delete[](void* pointer, std::size_t) noexcept { ::operator delete(pointer); }

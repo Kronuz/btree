@@ -16,10 +16,11 @@
 #include <vector>
 
 namespace {
-unsigned long calls = 0, bytes = 0;
+// Volatile: GCC 16 assumes replaceable new/delete touch no global state.
+volatile unsigned long calls = 0, bytes = 0;
 }
 void* operator new(std::size_t size) {
-	++calls; bytes += size;
+	calls = calls + 1; bytes = bytes + size;
 	if (void* pointer = std::malloc(size ? size : 1)) return pointer;
 	throw std::bad_alloc();
 }

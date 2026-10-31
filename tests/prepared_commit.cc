@@ -5,10 +5,14 @@
 #include <string>
 
 namespace {
-long allocation_budget = -1;
-long live_allocations = 0;
-bool deny_heap = false;
-unsigned denied_requests = 0;
+// The replaced operators below share this state with main. It is volatile
+// because GCC 16 assumes replaceable new/delete touch no global state
+// (-fassume-sane-operators-new-delete, on by default) and would otherwise
+// cache counter reads and drop budget stores across allocations.
+volatile long allocation_budget = -1;
+volatile long live_allocations = 0;
+volatile bool deny_heap = false;
+volatile unsigned denied_requests = 0;
 void check(bool condition) { if (!condition) std::abort(); }
 struct IncomingRefusal {};
 struct Value {
@@ -29,14 +33,14 @@ struct Value {
 }
 namespace {
 void admit_allocation() {
-    if (deny_heap) { ++denied_requests; throw std::bad_alloc(); }
+    if (deny_heap) { denied_requests = denied_requests + 1; throw std::bad_alloc(); }
     if (allocation_budget == 0) throw std::bad_alloc();
-    if (allocation_budget > 0) --allocation_budget;
+    if (allocation_budget > 0) allocation_budget = allocation_budget - 1;
 }
 }
 void* operator new(std::size_t bytes) {
     admit_allocation();
-    if (auto* pointer = std::malloc(bytes ? bytes : 1)) { ++live_allocations; return pointer; }
+    if (auto* pointer = std::malloc(bytes ? bytes : 1)) { live_allocations = live_allocations + 1; return pointer; }
     throw std::bad_alloc();
 }
 void* operator new[](std::size_t bytes) { return ::operator new(bytes); }
@@ -44,13 +48,13 @@ void* operator new(std::size_t bytes, std::align_val_t alignment) {
     admit_allocation();
     void* pointer = nullptr;
     if (posix_memalign(&pointer, static_cast<std::size_t>(alignment), bytes ? bytes : 1)) throw std::bad_alloc();
-    ++live_allocations;
+    live_allocations = live_allocations + 1;
     return pointer;
 }
 void* operator new[](std::size_t bytes, std::align_val_t alignment) { return ::operator new(bytes, alignment); }
 
 void operator delete(void* pointer) noexcept {
-    if (pointer) { --live_allocations; std::free(pointer); }
+    if (pointer) { live_allocations = live_allocations - 1; std::free(pointer); }
 }
 void operator delete[](void* pointer) noexcept { ::operator delete(pointer); }
 void operator delete(void* pointer, std::size_t) noexcept { ::operator delete(pointer); }
@@ -68,6 +72,7 @@ int main() {
         const auto four = std::string(127, 'k') + '4';
         const auto eight = std::string(127, 'k') + '8';
         bool complete = false;
+        int refusals = 0;
         for (long budget = 0; budget < 32; ++budget) {
             btree::map<std::string, Value> values;
             values.try_emplace(zero, 0); values.try_emplace(four, 4); values.try_emplace(eight, 8);
@@ -82,6 +87,7 @@ int main() {
             check(denied_requests == 0);
             check(values.at(zero).number == 0 && values.at(four).number == 4 && values.at(eight).number == 8);
             if (refused) {
+                ++refusals;
                 check(!armed && values.size() == 3 && live_allocations == before);
             } else {
                 check(armed && values.size() == 4 && values.at(two).number == 2);
@@ -90,7 +96,7 @@ int main() {
             values.verify();
             if (complete) break;
         }
-        check(complete);
+        check(complete && refusals > 0);
         btree::map<std::string, Value> values;
         values.try_emplace(zero, 0); values.try_emplace(four, 4); values.try_emplace(eight, 8);
         const auto before = live_allocations;
