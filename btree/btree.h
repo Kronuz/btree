@@ -322,27 +322,85 @@ struct btree_common_params {
 		uint8_t> node_count_type;
 };
 
+// Layout probe for map slots. A map stores std::pair<Key, T> (the "mutable"
+// pair) and exposes it as std::pair<const Key, T>, so relocation can move keys
+// instead of copying them. The two pair types must have identical size,
+// alignment and member offsets; the mirror structs below measure the offsets
+// without requiring pair itself to be standard layout.
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Winvalid-offsetof"
+#elif defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Winvalid-offsetof"
+#endif
+template <typename Key, typename Data>
+struct btree_map_slot_layout {
+	struct mutable_mirror { Key first; Data second; };
+	struct const_mirror { const Key first; Data second; };
+	typedef std::pair<Key, Data> mutable_pair;
+	typedef std::pair<const Key, Data> const_pair;
+	static constexpr bool compatible =
+		sizeof(mutable_pair) == sizeof(const_pair) &&
+		alignof(mutable_pair) == alignof(const_pair) &&
+		sizeof(mutable_mirror) == sizeof(const_mirror) &&
+		alignof(mutable_mirror) == alignof(const_mirror) &&
+		offsetof(mutable_mirror, first) == offsetof(const_mirror, first) &&
+		offsetof(mutable_mirror, second) == offsetof(const_mirror, second) &&
+		sizeof(mutable_pair) == sizeof(mutable_mirror) &&
+		std::is_standard_layout<mutable_pair>::value == std::is_standard_layout<const_pair>::value;
+};
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#elif defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+
 // A parameters structure for holding the type parameters for a map.
 template <typename Key, typename Data, typename Compare, typename Alloc, int TargetNodeSize>
 struct btree_map_params : public btree_common_params<Key, Compare, Alloc, TargetNodeSize, sizeof(Key) + sizeof(Data)> {
 	typedef Data data_type;
 	typedef Data mapped_type;
 	typedef std::pair<const Key, data_type> value_type;
+	typedef std::pair<Key, data_type> mutable_value_type;
 	typedef value_type* pointer;
 	typedef const value_type* const_pointer;
 	typedef value_type& reference;
 	typedef const value_type& const_reference;
 
+	// Slots hold a live mutable_value_type and are read as value_type through
+	// this union, the technique used by Abseil and libc++ for const-key pairs.
+	union slot_type {
+		value_type value;
+		mutable_value_type mutable_value;
+		slot_type() {}
+		~slot_type() {}
+	};
+	static_assert(btree_map_slot_layout<Key, Data>::compatible,
+		"pair<const Key, T> and pair<Key, T> must have the same size, alignment and member offsets");
+	static_assert(sizeof(slot_type) == sizeof(value_type) && alignof(slot_type) == alignof(value_type),
+		"map slot must have the size and alignment of its value");
+
 	enum {
 		kValueSize = sizeof(Key) + sizeof(data_type),
 	};
 
-	static void swap(value_type& a, value_type& b) {
-		btree_swap_helper(const_cast<Key&>(a.first), const_cast<Key&>(b.first));
+	static reference as_value(mutable_value_type& x) {
+		return reinterpret_cast<slot_type&>(x).value;
+	}
+	static const_reference as_value(const mutable_value_type& x) {
+		return reinterpret_cast<const slot_type&>(x).value;
+	}
+
+	static void swap(mutable_value_type& a, mutable_value_type& b) {
+		btree_swap_helper(a.first, b.first);
 		btree_swap_helper(a.second, b.second);
 	}
 
 	static const Key& get_key(const value_type& x) {
+		return x.first;
+	}
+	static const Key& get_key(const mutable_value_type& x) {
 		return x.first;
 	}
 };
@@ -353,6 +411,7 @@ struct btree_set_params : public btree_common_params<Key, Compare, Alloc, Target
 	typedef std::false_type data_type;
 	typedef std::false_type mapped_type;
 	typedef Key value_type;
+	typedef Key mutable_value_type;
 	typedef value_type* pointer;
 	typedef const value_type* const_pointer;
 	typedef value_type& reference;
@@ -362,69 +421,16 @@ struct btree_set_params : public btree_common_params<Key, Compare, Alloc, Target
 		kValueSize = sizeof(Key),
 	};
 
-	static void swap(value_type& a, value_type& b) {
+	static reference as_value(mutable_value_type& x) { return x; }
+	static const_reference as_value(const mutable_value_type& x) { return x; }
+
+	static void swap(mutable_value_type& a, mutable_value_type& b) {
 		btree_swap_helper(a, b);
 	}
 
 	static const Key& get_key(const value_type& x) {
 		return x;
 	}
-};
-
-template <typename T> struct btree_is_pair : std::false_type {};
-template <typename A, typename B>
-struct btree_is_pair<std::pair<A, B>> : std::true_type {};
-
-template <typename Pair>
-decltype(auto) btree_pair_source(Pair&& pair) {
-	if constexpr (std::is_lvalue_reference<Pair>::value || std::is_const<std::remove_reference_t<Pair>>::value)
-		return std::as_const(pair);
-	else return std::forward<Pair>(pair);
-}
-
-template <typename T> struct btree_is_tuple : std::false_type {};
-template <typename... T> struct btree_is_tuple<std::tuple<T...>> : std::true_type {};
-
-template <typename Key, typename Mapped, typename Pair,
-	bool = btree_is_pair<std::remove_cv_t<std::remove_reference_t<Pair>>>::value>
-struct btree_pair_preparable : std::false_type {};
-template <typename Key, typename Mapped, typename Pair>
-struct btree_pair_preparable<Key, Mapped, Pair, true> : std::integral_constant<bool,
-	!std::is_reference<typename std::remove_cv_t<std::remove_reference_t<Pair>>::first_type>::value &&
-	!std::is_reference<typename std::remove_cv_t<std::remove_reference_t<Pair>>::second_type>::value &&
-	std::is_constructible<Key, decltype((btree_pair_source(std::declval<Pair>()).first))>::value &&
-	std::is_constructible<Mapped, decltype((btree_pair_source(std::declval<Pair>()).second))>::value> {};
-
-template <typename Key, typename Mapped, typename... Args>
-struct btree_map_preparable : std::false_type {};
-template <typename Key, typename Mapped, typename A, typename B>
-struct btree_map_preparable<Key, Mapped, A, B> : std::integral_constant<bool,
-	std::is_constructible<Key, A&&>::value && std::is_constructible<Mapped, B&&>::value> {};
-template <typename Key, typename Mapped, typename Pair>
-struct btree_map_preparable<Key, Mapped, Pair> : btree_pair_preparable<Key, Mapped, Pair&&> {};
-template <typename Key, typename Mapped, typename A, typename B, typename C>
-struct btree_map_preparable<Key, Mapped, A, B, C> : std::integral_constant<bool,
-	std::is_same<std::remove_cv_t<std::remove_reference_t<A>>, std::piecewise_construct_t>::value &&
-	btree_is_tuple<std::remove_cv_t<std::remove_reference_t<B>>>::value &&
-	btree_is_tuple<std::remove_cv_t<std::remove_reference_t<C>>>::value> {};
-
-template <typename Key, typename Mapped>
-struct btree_prepared_map_value {
-	Key key;
-	Mapped mapped;
-
-	template <typename A, typename B>
-	btree_prepared_map_value(A&& a, B&& b) : key(std::forward<A>(a)), mapped(std::forward<B>(b)) {}
-	template <typename Pair>
-	explicit btree_prepared_map_value(Pair&& pair)
-		: key(btree_pair_source(std::forward<Pair>(pair)).first), mapped(btree_pair_source(std::forward<Pair>(pair)).second) {}
-	template <typename... A, typename... B>
-	btree_prepared_map_value(std::piecewise_construct_t, std::tuple<A...> a, std::tuple<B...> b)
-		: btree_prepared_map_value(std::move(a), std::move(b), std::index_sequence_for<A...>{}, std::index_sequence_for<B...>{}) {}
-private:
-	template <typename A, typename B, std::size_t... I, std::size_t... J>
-	btree_prepared_map_value(A&& a, B&& b, std::index_sequence<I...>, std::index_sequence<J...>)
-		: key(std::get<I>(std::forward<A>(a))...), mapped(std::get<J>(std::forward<B>(b))...) {}
 };
 
 // An adapter class that converts a lower-bound compare into an upper-bound
@@ -505,6 +511,7 @@ public:
 	typedef typename Params::key_type key_type;
 	typedef typename Params::data_type data_type;
 	typedef typename Params::value_type value_type;
+	typedef typename Params::mutable_value_type mutable_value_type;
 	typedef typename Params::pointer pointer;
 	typedef typename Params::const_pointer const_pointer;
 	typedef typename Params::reference reference;
@@ -687,10 +694,14 @@ public:
 		return params_type::get_key(slot_value(i));
 	}
 	reference value(int i) {
-		return reinterpret_cast<reference>(slot_value(i));
+		return params_type::as_value(slot_value(i));
 	}
 	const_reference value(int i) const {
-		return reinterpret_cast<const_reference>(slot_value(i));
+		return params_type::as_value(slot_value(i));
+	}
+	// The live object in slot i; relocation moves from it, so keys move.
+	mutable_value_type& mutable_value(int i) {
+		return slot_value(i);
 	}
 
 	// Swap value i in this node with value j in node x.
@@ -996,14 +1007,14 @@ private:
 		: fields_{true, 0, static_cast<typename base_fields::field_type>(capacity), 0, parent} {}
 	char* storage() { return reinterpret_cast<char*>(this); }
 	const char* storage() const { return reinterpret_cast<const char*>(this); }
-	value_type* value_slot(int i) {
-		return reinterpret_cast<value_type*>(storage() + values_offset() + std::size_t(i) * sizeof(value_type));
+	mutable_value_type* value_slot(int i) {
+		return reinterpret_cast<mutable_value_type*>(storage() + values_offset() + std::size_t(i) * sizeof(value_type));
 	}
-	const value_type* value_slot(int i) const {
-		return reinterpret_cast<const value_type*>(storage() + values_offset() + std::size_t(i) * sizeof(value_type));
+	const mutable_value_type* value_slot(int i) const {
+		return reinterpret_cast<const mutable_value_type*>(storage() + values_offset() + std::size_t(i) * sizeof(value_type));
 	}
-	value_type& slot_value(int i) { return *std::launder(value_slot(i)); }
-	const value_type& slot_value(int i) const { return *std::launder(value_slot(i)); }
+	mutable_value_type& slot_value(int i) { return *std::launder(value_slot(i)); }
+	const mutable_value_type& slot_value(int i) const { return *std::launder(value_slot(i)); }
 	btree_node** child_slot(int i) {
 		return reinterpret_cast<btree_node**>(storage() + children_offset() + std::size_t(i) * sizeof(btree_node*));
 	}
@@ -1020,11 +1031,11 @@ private:
 	}
 
 	template <typename... Args>
-	void construct_value(value_type* v, Args&&... args) {
+	void construct_value(mutable_value_type* v, Args&&... args) {
 #if __cplusplus > 201703L
 		std::construct_at(v, std::forward<Args>(args)...);
 #else
-		new (v) value_type(std::forward<Args>(args)...);
+		new (v) mutable_value_type(std::forward<Args>(args)...);
 #endif
 		// FIXME: The above should use allocator_traits, but allocator
 		// object is not available here at the nodes, is in the tree:
@@ -1039,7 +1050,7 @@ private:
 		construct_value(value_slot(i), std::forward<Args>(args)...);
 	}
 
-	void destroy_value(value_type* v) {
+	void destroy_value(mutable_value_type* v) {
 		std::destroy_at(v);
 		// FIXME: The above should use allocator_traits, but allocator
 		// object is not available here at the nodes, is in the tree:
@@ -1249,6 +1260,7 @@ public:
 	typedef typename Params::data_type data_type;
 	typedef typename Params::mapped_type mapped_type;
 	typedef typename Params::value_type value_type;
+	typedef typename Params::mutable_value_type mutable_value_type;
 	typedef typename Params::key_compare key_compare;
 	typedef typename Params::pointer pointer;
 	typedef typename Params::const_pointer const_pointer;
@@ -1371,14 +1383,14 @@ public:
 	// boolean return value indicates whether insertion succeeded or failed.
 	template <typename... Args>
 	std::pair<iterator, bool> emplace_unique(Args&&... args) {
-		value_type v(std::forward<Args>(args)...);
+		mutable_value_type v(std::forward<Args>(args)...);
 		return emplace_unique_key_args(params_type::get_key(v), std::move(v));
 	}
 
 	template <class P>
 	std::pair<iterator, bool>
 	emplace_unique_extract_key(P&& x, btree_extract_key_fail_tag) {
-		value_type v(std::forward<P>(x));
+		mutable_value_type v(std::forward<P>(x));
 		return emplace_unique_key_args(params_type::get_key(v), std::move(v));
 	}
 
@@ -1420,14 +1432,14 @@ public:
 	// boolean return value indicates whether insertion succeeded or failed.
 	template <typename... Args>
 	iterator emplace_hint_unique(const_iterator hint, Args&&... args) {
-		value_type v(std::forward<Args>(args)...);
+		mutable_value_type v(std::forward<Args>(args)...);
 		return emplace_hint_unique_key_args(hint, params_type::get_key(v), std::move(v));
 	}
 
 	template <class P>
 	iterator
 	emplace_hint_unique_extract_key(const_iterator hint, P&& x, btree_extract_key_fail_tag) {
-		value_type v(std::forward<P>(x));
+		mutable_value_type v(std::forward<P>(x));
 		return emplace_hint_unique_key_args(hint, params_type::get_key(v), std::move(v));
 	}
 
@@ -1479,7 +1491,7 @@ public:
 	// Inserts a value into the btree.
 	template <typename... Args>
 	iterator emplace_multi(Args&&... args) {
-		value_type v(std::forward<Args>(args)...);
+		mutable_value_type v(std::forward<Args>(args)...);
 		return emplace_multi_key_args(params_type::get_key(v), std::move(v));
 	}
 
@@ -1493,7 +1505,7 @@ public:
 	// Inserts a value into the btree.
 	template <typename... Args>
 	iterator emplace_hint_multi(const_iterator hint, Args&&... args) {
-		value_type v(std::forward<Args>(args)...);
+		mutable_value_type v(std::forward<Args>(args)...);
 		return emplace_hint_multi_key_args(hint, params_type::get_key(v), std::move(v));
 	}
 
@@ -2220,7 +2232,7 @@ void btree_node<P>::split(btree_node* dst, int insert_position) {
 
 	// The split key is the largest value in the left sibling.
 	set_count(--cnt);
-	get_parent()->insert_value(position(), std::move(value(cnt)));
+	get_parent()->insert_value(position(), std::move(slot_value(cnt)));
 	destroy_value(cnt);
 	get_parent()->set_child(position() + 1, dst);
 }
@@ -2608,6 +2620,7 @@ void btree<P>::rebalance_or_split(iterator& iter) {
 	node_type*& node = iter.node;
 	int& insert_position = iter.position;
 	assert(node->count() == node->max_count());
+	node_type* split_node = nullptr;
 
 	// First try to make room on the node by rebalancing.
 	node_type* parent = node->get_parent();
@@ -2666,27 +2679,47 @@ void btree<P>::rebalance_or_split(iterator& iter) {
 			}
 		}
 
-		// Rebalancing failed, make sure there is room on the parent node for a new
-		// value.
+		// Rebalancing failed, so this node splits. Allocate its sibling before
+		// making room on the parent: allocations run from the leaf upward and
+		// all precede the first value move, so a refusal anywhere in the chain
+		// releases what was allocated and leaves the tree as it was.
+		split_node = node->is_leaf() ? new_leaf_node(parent) : new_internal_node(parent);
 		if (parent->count() == parent->max_count()) {
 			iterator parent_iter(node->get_parent(), node->position());
-			rebalance_or_split(parent_iter);
+			try {
+				rebalance_or_split(parent_iter);
+			} catch (...) {
+				if (split_node->is_leaf()) delete_leaf_node(split_node);
+				else delete_internal_node(split_node);
+				throw;
+			}
 		}
 	} else {
-		// Rebalancing not possible because this is the root node.
+		// Rebalancing not possible because this is the root node. Allocate the
+		// sibling and any new root before reshaping anything.
+		split_node = node->is_leaf() ? new_leaf_node(parent) : new_internal_node(parent);
+		try {
+			if (root()->is_leaf()) {
+				// The root node is currently a leaf node: create a new root node and set
+				// the current root node as the child of the new root.
+				parent = new_internal_root_node();
+			} else {
+				// The root node is an internal node. We do not want to create a new root
+				// node because the root node is special and holds the size of the tree
+				// and a pointer to the rightmost node. So we create a new internal node
+				// and move all of the items on the current root into the new node.
+				parent = new_internal_node(parent);
+			}
+		} catch (...) {
+			if (split_node->is_leaf()) delete_leaf_node(split_node);
+			else delete_internal_node(split_node);
+			throw;
+		}
 		if (root()->is_leaf()) {
-			// The root node is currently a leaf node: create a new root node and set
-			// the current root node as the child of the new root.
-			parent = new_internal_root_node();
 			parent->set_child(0, root());
 			__root() = parent;
 			assert(__rightmost() == parent->child(0));
 		} else {
-			// The root node is an internal node. We do not want to create a new root
-			// node because the root node is special and holds the size of the tree
-			// and a pointer to the rightmost node. So we create a new internal node
-			// and move all of the items on the current root into the new node.
-			parent = new_internal_node(parent);
 			parent->set_child(0, parent);
 			parent->swap(root());
 			node = parent;
@@ -2694,16 +2727,9 @@ void btree<P>::rebalance_or_split(iterator& iter) {
 	}
 
 	// Split the node.
-	node_type* split_node;
-	if (node->is_leaf()) {
-		split_node = new_leaf_node(parent);
-		node->split(split_node, insert_position);
-		if (rightmost() == node) {
-			__rightmost() = split_node;
-		}
-	} else {
-		split_node = new_internal_node(parent);
-		node->split(split_node, insert_position);
+	node->split(split_node, insert_position);
+	if (node->is_leaf() && rightmost() == node) {
+		__rightmost() = split_node;
 	}
 
 	if (insert_position > node->count()) {
@@ -2840,9 +2866,12 @@ btree<P>::replace_leaf(node_type* original, int position, int capacity, Args&&..
 			if (i == position) {
 				incoming_live = false;
 			} else {
-				if constexpr (std::is_same<key_type, value_type>::value && !std::is_copy_constructible<value_type>::value)
+				// A move that may throw and has no copy fallback can consume keys.
+				if constexpr (!std::is_nothrow_move_constructible<mutable_value_type>::value &&
+						!std::is_copy_constructible<mutable_value_type>::value &&
+						!std::is_trivially_copy_constructible<key_type>::value)
 					keys_consumed = true;
-				replacement->construct_value(i, std::move_if_noexcept(original->value(source++)));
+				replacement->construct_value(i, std::move_if_noexcept(original->mutable_value(source++)));
 			}
 			replacement->set_count(i + 1);
 		}
@@ -2872,61 +2901,18 @@ btree<P>::emplace_nonfull(iterator iter, Args&&... args) {
 	const int count = node->count();
 	if (iter.position == count) {
 		node->insert_value(count, std::forward<Args>(args)...);
-	} else if constexpr (std::is_same<key_type, value_type>::value) {
-		if constexpr (std::is_nothrow_move_constructible<value_type>::value && sizeof(value_type) <= P::kTargetNodeSize) {
-			value_type incoming(std::forward<Args>(args)...);
-			for (int j = count - 1; j >= iter.position; --j) {
-				node->construct_value(j + 1, std::move(node->value(j)));
-				node->destroy_value(j);
-			}
-			node->construct_value(iter.position, std::move(incoming));
-			node->set_count(count + 1);
-		} else return replace_leaf(node, iter.position, node->max_count(), std::forward<Args>(args)...);
+	} else if constexpr (std::is_nothrow_move_constructible<mutable_value_type>::value &&
+			sizeof(mutable_value_type) <= P::kTargetNodeSize) {
+		// Relocation cannot throw: build the incoming value first, then shift.
+		mutable_value_type incoming(std::forward<Args>(args)...);
+		for (int j = count - 1; j >= iter.position; --j) {
+			node->construct_value(j + 1, std::move(node->mutable_value(j)));
+			node->destroy_value(j);
+		}
+		node->construct_value(iter.position, std::move(incoming));
+		node->set_count(count + 1);
 	} else {
-		constexpr bool eligible = std::is_copy_constructible<key_type>::value &&
-			std::is_nothrow_move_constructible<key_type>::value && !std::is_reference<mapped_type>::value &&
-			std::is_nothrow_move_constructible<mapped_type>::value;
-		constexpr bool preparable = [] {
-			if constexpr (eligible) return btree_map_preparable<key_type, mapped_type, Args...>::value;
-			else return false;
-		}();
-		if constexpr (preparable) {
-			using prepared = btree_prepared_map_value<key_type, mapped_type>;
-			auto commit = [&](prepared& incoming, auto&& key_at) {
-				for (int j = count - 1; j >= iter.position; --j) {
-					node->construct_value(j + 1, std::piecewise_construct,
-						std::forward_as_tuple(key_at(j)), std::forward_as_tuple(std::move(node->value(j).second)));
-					node->destroy_value(j);
-				}
-				node->construct_value(iter.position, std::piecewise_construct,
-					std::forward_as_tuple(std::move(incoming.key)), std::forward_as_tuple(std::move(incoming.mapped)));
-				node->set_count(count + 1);
-			};
-			if constexpr (std::is_nothrow_copy_constructible<key_type>::value) {
-				if constexpr (sizeof(prepared) <= P::kTargetNodeSize) {
-					prepared incoming(std::forward<Args>(args)...);
-					commit(incoming, [&](int j) -> const key_type& { return node->value(j).first; });
-				} else return replace_leaf(node, iter.position, node->max_count(), std::forward<Args>(args)...);
-			} else if constexpr (sizeof(prepared) <= P::kTargetNodeSize &&
-				std::size_t(kNodeValues - 1) <= (P::kTargetNodeSize - sizeof(prepared)) / sizeof(key_type)) {
-				struct key_bank {
-					std::aligned_storage_t<sizeof(key_type), alignof(key_type)> slots[kNodeValues - 1];
-					int count;
-					key_bank() : count(0) {}
-					key_type* at(int i) { return std::launder(reinterpret_cast<key_type*>(&slots[i])); }
-					~key_bank() { while (count) at(--count)->~key_type(); }
-				};
-				struct scratch { prepared incoming; key_bank keys; };
-				if constexpr (sizeof(scratch) <= P::kTargetNodeSize) {
-					scratch state{prepared(std::forward<Args>(args)...), key_bank{}};
-					for (int j = iter.position; j < count; ++j) {
-						::new (static_cast<void*>(&state.keys.slots[state.keys.count])) key_type(node->value(j).first);
-						++state.keys.count;
-					}
-					commit(state.incoming, [&](int j) -> key_type&& { return std::move(*state.keys.at(j - iter.position)); });
-				} else return replace_leaf(node, iter.position, node->max_count(), std::forward<Args>(args)...);
-			} else return replace_leaf(node, iter.position, node->max_count(), std::forward<Args>(args)...);
-		} else return replace_leaf(node, iter.position, node->max_count(), std::forward<Args>(args)...);
+		return replace_leaf(node, iter.position, node->max_count(), std::forward<Args>(args)...);
 	}
 	if (!root()->is_leaf()) ++__size();
 	return iter;
@@ -2952,6 +2938,16 @@ btree<P>::internal_emplace(const_iterator hint, Args&&... args) {
 			// size. Simply grow the size of the root node.
 			assert(iter.node == root());
 			return replace_leaf(iter.node, iter.position, std::min<int>(kNodeValues, 2 * iter.node->max_count()), std::forward<Args>(args)...);
+		} else if constexpr (std::is_nothrow_move_constructible<mutable_value_type>::value &&
+				sizeof(mutable_value_type) <= P::kTargetNodeSize) {
+			// Construct the incoming value before reshaping the tree: a refusal
+			// leaves the tree untouched, and arguments that alias contained
+			// values are read before any relocation.
+			mutable_value_type incoming(std::forward<Args>(args)...);
+			rebalance_or_split(iter);
+			++__size();
+			iter.node->insert_value(iter.position, std::move(incoming));
+			return iter;
 		} else {
 			rebalance_or_split(iter);
 			++__size();

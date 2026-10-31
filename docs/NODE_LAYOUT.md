@@ -36,28 +36,36 @@ The first value is constructed in an unpublished one-slot leaf. A failed constru
 
 Copy construction builds each value once in a compact ordered shape, with O(height) planning storage. Single-leaf copies use a stack plan through the same builder. Completed children and constructed value prefixes have independent guards; cleanup uses exact leaf/internal/root allocation extents without interpreting an unpublished root sentinel. Copies preserve duplicate order and alignment.
 
-Copy failure releases all newly owned nodes and values while preserving the source. Assignment clears with the previous allocator, then follows the established comparator/allocator propagation convention. Failed value construction leaves an empty destination; preserving its previous contents is not promised. This repair does not change general insertion, erase or const-key mutation behavior.
+Copy failure releases all newly owned nodes and values while preserving the source. Assignment clears with the previous allocator, then follows the established comparator/allocator propagation convention. Failed value construction leaves an empty destination; preserving its previous contents is not promised.
 
 ## Guarded compact-root growth
 
 A full compact leaf root grows into one unpublished geometric-capacity replacement. Construct incoming arguments first at their final position to preserve contained lvalue aliases. A separate incoming flag covers that slot until the contiguous constructed prefix reaches it. Original values use `move_if_noexcept`; failure destroys any disjoint incoming value, the counted prefix and the exact replacement extent. Publish only after all values exist, then destroy the original root.
 
-Copyable values retain contents on failure when copied, and nonthrowing moves leave no later fallible transfer. Throwing move-only mapped values may remain moved-from with keys and topology valid. If a noncopyable set-key move is attempted and fails, clean the replacement then clear the original set canonically. Explicit contained mapped moves can consume their source; moving contained set keys is unsupported. This branch uses actual const-key values and no swaps, planner or scratch allocation; full-node splitting, nonfull insertion and erase are unchanged.
+Copyable values retain contents on failure when copied, and nonthrowing moves leave no later fallible transfer. Throwing move-only mapped values may remain moved-from with keys and topology valid. If a noncopyable set-key move is attempted and fails, clean the replacement then clear the original set canonically. Explicit contained mapped moves can consume their source; moving contained set keys is unsupported. Growth uses no swaps, planner or scratch allocation.
 
 ## Nonfull insertion accounting
 
-An internal root increments its size only after nonfull leaf insertion succeeds. Incoming-constructor refusal on direct append preserves the previous size; retry can reuse the existing leaf without allocation. This does not change full-node split accounting or repair the shifting mechanism for middle insertion.
+An internal root increments its size only after nonfull leaf insertion succeeds. Incoming-constructor refusal on direct append preserves the previous size; retry can reuse the existing leaf without allocation.
 
-## Prepared nonfull insertion
+## Value slots and relocation
 
-Nonfull middle insertion prepares incoming arguments before consuming originals. Eligible sets shift through one empty slot using nonthrowing moves. Eligible maps also prepare every fallible shifted-key copy, then construct actual const-key pairs and destroy their sources. No library allocation or comparison remains in commitment. Append stays direct.
+A set slot holds its key. A map slot holds a live `std::pair<Key, T>`, the mutable pair, and `reference` exposes it as `std::pair<const Key, T>&` through the union `btree_map_params::slot_type` (`value` and `mutable_value` members), the technique Abseil's `map_slot_type` and libc++ use. Splitting, rebalancing, merging, erasing and root replacement relocate a value by move-constructing the mutable pair at the destination and destroying the source, so a key moves instead of being copied. `params::swap` swaps the mutable pair; no `const_cast` is involved. Temporaries built for emplacement are mutable pairs for the same reason.
 
-Scratch uses the configured target-node byte budget, checked against the actual combined storage size after an overflow-safe capacity check. Key storage has a counted prefix and global placement construction. Constructor selection is preserved through narrow member checks and guarded fallback; reference-valued maps and reference-element pairs take that fallback. Throwing-move types reuse the compact-growth replacement guard, with its documented basic recovery limits.
+The exposure is implementation-defined, not guaranteed by the standard. Compile-time checks gate it: `btree_map_slot_layout` requires identical size and alignment for both pair types and identical member offsets for mirror structs of `Key`/`T` with and without a const key, and the slot union must have the value's size and alignment. A library whose two pair types differ fails to compile; there is no fallback.
 
-The complete-heap fixture denies ordinary and aligned allocation from the first original mapped move and checks incoming refusal before consumption. Layout and mixed-mode qualification cover C++17/C++20 and both diagnostic modes. This repair does not change full-node split, promotion, rebalance or erase behavior.
+When `std::is_nothrow_move_constructible` holds for the mutable pair (`std::string`, variants and nested maps of such types), relocation cannot throw. Every allocation then precedes the first value move:
+
+- `internal_emplace` constructs the incoming value before reshaping the tree, so a refused construction leaves the tree untouched and arguments aliasing contained values are read first.
+- `rebalance_or_split` allocates each level's sibling before recursing into the parent, from the leaf upward, and allocates the new root, if any, before the root is reshaped. A refusal at any level releases the sibling nodes already allocated.
+- Erase, merge, root collapse and node swap allocate nothing.
+
+An insertion that is refused leaves contents, structure and live allocations unchanged. Middle insertion into a nonfull leaf shifts values by move into the gap.
+
+Types whose move may throw keep the earlier behavior: the incoming value is built first for compact-root growth, later relocation may throw midway through a split, rebalance or merge, and no recovery is attempted. Growth of a compact root uses `std::move_if_noexcept`, and a throwing move without a copy fallback clears the container on failure when keys may have been consumed.
 
 ## Ownership moves
 
 Root links are node-relative, so moving ownership needs no traversal or reparenting. Copy comparator and internal-allocator state before transferring the root; a preparation failure leaves the source owning its nodes. Move assignment first clears the destination with its previous allocator, then adopts source state and root. A failed assignment leaves an empty destination. This retains the existing source-allocator adoption convention for unequal allocators.
 
-The moved source is empty and reusable, and transferred element addresses and node capacity remain unchanged. Self-move preserves contents; const rvalues copy. Conditional `noexcept` depends on comparator/internal-allocator copy operations, independently of value movement. Copy and member-swap behavior remain unchanged. Ownership moves do not repair structural mutation of const-key pairs.
+The moved source is empty and reusable, and transferred element addresses and node capacity remain unchanged. Self-move preserves contents; const rvalues copy. Conditional `noexcept` depends on comparator/internal-allocator copy operations, independently of value movement. Copy and member-swap behavior remain unchanged.

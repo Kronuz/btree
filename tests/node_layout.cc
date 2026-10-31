@@ -928,25 +928,13 @@ void prepared_key_failures() {
 				for (int i = 0; i < node->count(); ++i) if (std::addressof(node->value(i)) == std::addressof(*cursor)) position = i;
 				require(position >= 0);
 				++covered;
-				std::vector<std::pair<int,int>> contents;
-				for (const auto& entry : values) contents.emplace_back(entry.first.value, entry.second);
 				const auto bytes = state->bytes, calls = state->requests.size();
-				const auto objects = PreparedKey::live;
-				for (int budget = 0; budget < node->count() - position; ++budget) {
-					PreparedKey::copies = budget;
-					bool refused = false;
-					try { values.try_emplace(PreparedKey(key), key); }
-					catch (const std::runtime_error& error) { require(std::string_view(error.what()) == "prepared key copy"); refused = true; }
-					PreparedKey::copies = -1;
-					require(refused && PreparedKey::live == objects && state->bytes == bytes && state->requests.size() == calls);
-					require(values.size() == contents.size());
-					auto expected = contents.begin();
-					for (const auto& entry : values) { require(entry.first.value == expected->first && entry.second == expected->second); ++expected; }
-					values.verify();
-				}
+				// Shifting relocates keys by move: refusing every copy and every allocation
+				// must not matter, and nothing is allocated or copied.
+				PreparedKey::copies = 0;
 				PreparedKey::deny = state.get();
 				auto inserted = values.try_emplace(PreparedKey(key), key);
-				PreparedKey::deny = nullptr; state->fail = false;
+				PreparedKey::deny = nullptr; state->fail = false; PreparedKey::copies = -1;
 				require(inserted.second && inserted.first->first.value == key && inserted.first->second == key);
 				require(state->requests.size() == calls && state->bytes == bytes && values.size() == static_cast<std::size_t>(count + 1));
 				values.verify();
@@ -1046,11 +1034,13 @@ void prepared_forwarding() {
 			if (address >= begin && address < begin + allocation.second.bytes) node = std::launder(static_cast<Node*>(allocation.first));
 		}
 		require(node && node->is_leaf() && node->count() < node->max_count());
-		state->fail = true; bool refused = false;
-		try { values.try_emplace(BudgetKey(10), 10); } catch (const std::bad_alloc&) { refused = true; }
+		// The pair fits the node-size budget and its moves cannot throw, so a
+		// middle insertion into a nonfull leaf needs no allocation.
+		const auto calls = state->requests.size();
+		state->fail = true;
+		values.try_emplace(BudgetKey(10), 10);
 		state->fail = false;
-		require(refused && values.size() == 4 && values.find(BudgetKey(10)) == values.end()); values.verify();
-		values.try_emplace(BudgetKey(10), 10); require(values.size() == 5); values.verify();
+		require(values.size() == 5 && values.at(BudgetKey(10)).bytes[0] == 10 && state->requests.size() == calls); values.verify();
 	}
 	require(state->live.empty() && state->bytes == 0);
 }
