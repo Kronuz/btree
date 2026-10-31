@@ -8,7 +8,7 @@ test_compiler=${CXX:-c++}
 for standard in 17 20; do
     for mode in release debug; do
         case "$mode" in release) diagnostic=-DNDEBUG ;; debug) diagnostic=-UNDEBUG ;; esac
-        for fixture in node_layout prepared_commit ownership_move; do
+        for fixture in node_layout prepared_commit ownership_move relocation_failure; do
         output="$test_build/cxx$standard-$mode"
         if [ "$fixture" != node_layout ]; then
             if [ -n "${BTREE_TEST_CASE:-}" ]; then continue; fi
