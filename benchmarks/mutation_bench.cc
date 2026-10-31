@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <btree/map.h>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <numeric>
 #include <random>
@@ -62,7 +63,14 @@ int main(int argc, char** argv) {
 			static_cast<std::size_t>(source.bytes_used()), copied_bytes, 1000.0 * (std::clock() - start) / CLOCKS_PER_SEC);
 		return 0;
 	}
-	if (argc != 1) return 2;
+	// --keys=N pads each key to N bytes: 16 and 200 bytes exceed small-string
+	// buffers, so every key copy allocates and every key move does not.
+	std::size_t key_bytes = 0;
+	if (argc == 2 && std::string_view(argv[1]).substr(0, 7) == "--keys=")
+		key_bytes = std::strtoul(argv[1] + 7, nullptr, 10);
+	else if (argc != 1) return 2;
+	if (key_bytes)
+		for (auto& key : keys) key.resize(std::max(key_bytes, key.size()), 'k');
 	const auto start = std::clock();
 	for (unsigned cycle = 0; cycle < cycles; ++cycle) {
 		btree::map<std::string, std::string> map;
@@ -74,6 +82,6 @@ int main(int argc, char** argv) {
 		if (!map.empty())
 			return 1;
 	}
-	std::printf("{\"entries\":%u,\"cycles\":%u,\"process_cpu_ms\":%.6f}\n", entries, cycles,
-				1000.0 * (std::clock() - start) / CLOCKS_PER_SEC);
+	std::printf("{\"entries\":%u,\"cycles\":%u,\"key_bytes\":%zu,\"process_cpu_ms\":%.6f}\n", entries, cycles,
+				keys[0].size(), 1000.0 * (std::clock() - start) / CLOCKS_PER_SEC);
 }
