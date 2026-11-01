@@ -1,8 +1,12 @@
-// std::string-keyed insert/find: btree::map vs absl::btree_map. ns per operation,
-// best of 5. Build against an older header tree (-I) for a before/after.
+// std::string-keyed insert/find: btree::map against absl::btree_map and std::map. ns per
+// operation, best of 5. Every map must hold the same keys and return the same value for every
+// key; the run aborts otherwise.
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <map>
 #include <random>
 #include <string>
 #include <vector>
@@ -27,7 +31,7 @@ static double best_ns(F&& f, double ops, int reps = 5) {
 }
 
 template <class M>
-static void row(const char* name, const std::vector<std::string>& keys, const std::vector<std::string>& sorted) {
+static std::uint64_t row(const char* name, const std::vector<std::string>& keys, const std::vector<std::string>& sorted) {
 	const double n = double(keys.size());
 	double rnd = best_ns([&] { M m; for (std::size_t i = 0; i < keys.size(); ++i) m.emplace(keys[i], int(i)); sink = m.size(); }, n);
 	double srt = best_ns([&] { M m; for (std::size_t i = 0; i < sorted.size(); ++i) m.emplace(sorted[i], int(i)); sink = m.size(); }, n);
@@ -35,7 +39,11 @@ static void row(const char* name, const std::vector<std::string>& keys, const st
 	M m;
 	for (std::size_t i = 0; i < keys.size(); ++i) m.emplace(keys[i], int(i));
 	double find = best_ns([&] { std::uint64_t s = 0; for (auto& k : keys) s += m.find(k)->second; sink = s; }, n);
-	std::printf("  %-14s emplace random %6.1f  sorted %6.1f  operator[] %6.1f  find %6.1f ns\n", name, rnd, srt, sub, find);
+	// The values are the key's index and the keys are distinct, so equal maps give equal checks.
+	std::uint64_t check = m.size();
+	for (auto& k : keys) check = check * 1099511628211ull + std::uint64_t(m.find(k)->second);
+	std::printf("  %-18s emplace random %6.1f  sorted %6.1f  operator[] %6.1f  find %6.1f ns\n", name, rnd, srt, sub, find);
+	return check;
 }
 
 int main() {
@@ -46,7 +54,12 @@ int main() {
 		auto sorted = keys;
 		std::sort(sorted.begin(), sorted.end());
 		std::printf("n=%zu\n", n);
-		row<btree::map<std::string, int>>("btree::map", keys, sorted);
-		row<absl::btree_map<std::string, int>>("absl::btree_map", keys, sorted);
+		auto a = row<btree::map<std::string, int>>("btree::map", keys, sorted);
+		auto b = row<absl::btree_map<std::string, int>>("absl::btree_map", keys, sorted);
+		auto c = row<std::map<std::string, int>>("std::map", keys, sorted);
+		if (a != c || b != c) {
+			std::fprintf(stderr, "the maps disagree\n");
+			return EXIT_FAILURE;
+		}
 	}
 }

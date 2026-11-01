@@ -4,6 +4,13 @@ All notable changes to `btree`. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the library has no
 releases, so entries are dated.
 
+## 2026-11-01
+
+### Changed
+
+- `benchmarks/string_insert_bench.cc` also times `std::map` and stops if the three maps hold
+  different keys or return different values.
+
 ## 2026-10-31
 
 ### Fixed
