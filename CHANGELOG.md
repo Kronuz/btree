@@ -77,8 +77,8 @@ releases, so entries are dated.
 
 ### Performance
 
-Intel i9-9980HK, macOS 15 x86_64, `-std=c++20 -O3 -DNDEBUG`, each batch under a
-`quiet` exclusive hold, arms alternating with the order reversed every round,
+Intel i9-9980HK, macOS 15 x86_64, `-std=c++20 -O3 -DNDEBUG`, each batch with the
+machine held for exclusive use, arms alternating with the order reversed every round,
 and a byte-identical copy of the new binary as an A/A arm. `master` is
 `25f9494`; `main` is the deleted const_cast branch `a0b60e3`. Medians.
 
@@ -114,7 +114,7 @@ Keys of 16 bytes fit libc++'s small-string buffer and exceed libstdc++'s. The
 batch with one put the new code within 1% of `main` there, with A/A spreads of
 5-10%.
 
-The `u64` rows of the campaign benchmark (insert, find, iterate, copy and
+The `u64` rows of an integer-key harness outside the repository (insert, find, iterate, copy and
 erase at n = 1,000, 100,000 and 1,000,000) stay within 3.5% of master in both
 compilers, inside their A/A spread.
 
