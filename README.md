@@ -92,13 +92,16 @@ Not for:
 ## ⚡ Performance
 
 String keys of 24 to 28 bytes (`"key/<u64>/item"`), 200,000 random insertions and lookups, ns
-per operation, the median of 11 rounds of best-of-7 runs. Intel Core i9-9980HK, macOS 15, Apple
-clang 17 with libc++, `-std=c++20 -O3 -DNDEBUG`:
+per operation, best of 5 per run, then the fastest of three runs. Apple clang 17 with libc++,
+C++20, `-O3 -DNDEBUG`, on an Apple M4 Pro (macOS 26) and an Intel Core i9-9980HK (macOS 15):
 
-| Operation | `btree::map` | `absl::btree_map` (abseil 20260817) |
-|---|--:|--:|
-| `emplace` | 679 | 618 to 625 |
-| `find` | 643 | 572 |
+| Operation | `btree::map`, M4 Pro | `absl::btree_map` (abseil 20260817) | `btree::map`, i9 | `absl::btree_map` |
+|---|--:|--:|--:|--:|
+| `emplace` | 287 | 254 | 687 | 660 |
+| `find` | 237 | 225 | 634 | 573 |
+
+Within each run `btree::map` takes 4% to 23% longer than `absl::btree_map` to `emplace` and 5%
+to 13% longer to `find`. The i9's runs differ by up to 22% from one another.
 
 ```sh
 cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --target string_insert_bench
