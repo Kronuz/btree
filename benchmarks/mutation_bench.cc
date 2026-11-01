@@ -63,8 +63,8 @@ int main(int argc, char** argv) {
 			static_cast<std::size_t>(source.bytes_used()), copied_bytes, 1000.0 * (std::clock() - start) / CLOCKS_PER_SEC);
 		return 0;
 	}
-	// --keys=N pads each key to N bytes: 16 and 200 bytes exceed small-string
-	// buffers, so every key copy allocates and every key move does not.
+	// --keys=N pads each key to N bytes. 16 bytes exceed libstdc++'s small-string
+	// buffer (15) but not libc++'s (22); 200 bytes exceed both.
 	std::size_t key_bytes = 0;
 	if (argc == 2 && std::string_view(argv[1]).substr(0, 7) == "--keys=")
 		key_bytes = std::strtoul(argv[1] + 7, nullptr, 10);
