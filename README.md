@@ -91,17 +91,24 @@ Not for:
 
 ## ⚡ Performance
 
-String keys of 24 to 28 bytes (`"key/<u64>/item"`), 200,000 random insertions and lookups, ns
-per operation, best of 5 per run, then the fastest of three runs. Apple clang 17 with libc++,
-C++20, `-O3 -DNDEBUG`, on an Apple M4 Pro (macOS 26) and an Intel Core i9-9980HK (macOS 15):
+`string_insert_bench` times `emplace` (200,000 random string keys of 24 to 28 bytes,
+`"key/<u64>/item"`, into an empty map) and `find` (a lookup of each of those keys) in ns per
+operation, best of 5 per run, then the fastest of eight runs on the M4 Pro and three on the i9.
+The columns are `btree::map`, `absl::btree_map` from
+[abseil](https://github.com/abseil/abseil-cpp) 20260817.0 (also a B-tree) and `std::map` from
+libc++ 20.1 (a red-black tree). The benchmark checks that the three maps hold the same keys and
+return the same value for every key, and stops otherwise. Apple clang 17.0.0 with libc++, C++20,
+`-O3 -DNDEBUG`, on an Apple M4 Pro (macOS 26.7) and an Intel Core i9-9980HK (macOS 15.8):
 
-| Operation | `btree::map`, M4 Pro | `absl::btree_map` (abseil 20260817) | `btree::map`, i9 | `absl::btree_map` |
-|---|--:|--:|--:|--:|
-| `emplace` | 287 | 254 | 687 | 660 |
-| `find` | 237 | 225 | 634 | 573 |
+| Operation | `btree::map`, M4 Pro | `absl::btree_map`, M4 Pro | `std::map`, M4 Pro | `btree::map`, i9-9980HK | `absl::btree_map`, i9-9980HK | `std::map`, i9-9980HK |
+|---|--:|--:|--:|--:|--:|--:|
+| `emplace` | 302 | 271 | 379 | 697 | 628 | 757 |
+| `find` | 283 | 306 | 319 | 630 | 556 | 631 |
 
-Within each run `btree::map` takes 4% to 23% longer than `absl::btree_map` to `emplace` and 5%
-to 13% longer to `find`. The i9's runs differ by up to 22% from one another.
+Run by run, `btree::map`'s time against `absl::btree_map`'s is 16% less to 24% more for `emplace`
+and 9% less to 14% more for `find`; against `std::map`'s it is 6% to 39% less for `emplace` and
+17% less to 0% more for `find`. The i9's runs differ by up to 3% from one another and the M4 Pro's
+by up to 37%, as other work shares that machine.
 
 ```sh
 cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --target string_insert_bench

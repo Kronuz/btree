@@ -3,9 +3,10 @@
 The harnesses live in [`benchmarks/`](../../benchmarks/). Compare identical compiler flags and
 sources on an otherwise idle machine, with an A/A arm to show the noise floor.
 
-- `benchmarks/string_insert_bench.cc` compares string-key `emplace`, `operator[]` and `find`
-  with `absl::btree_map`. CMake builds it (`--target string_insert_bench`) only when it finds
-  abseil.
+- `benchmarks/string_insert_bench.cc` compares string-key `emplace` (random and sorted order),
+  `operator[]` and `find` with `absl::btree_map` and `std::map`, and stops if the three maps
+  do not hold the same keys and values. CMake builds it (`--target string_insert_bench`) only
+  when it finds abseil.
 - `benchmarks/mutation_bench.cc` times 65,536 random insertions and erasures of string keys;
   `--keys=N` pads keys to N bytes, and `--copy`, `--copy-pruned` and `--move-nested` time
   copies and nested moves. Set `-DBTREE_BENCH_CYCLES=64` for longer runs.
