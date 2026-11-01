@@ -80,6 +80,8 @@ cmake -B build && cmake --build build --target string_insert_bench
   and the recorded qualification.
 - [docs/NODE_LAYOUT.md](docs/NODE_LAYOUT.md): compact node storage, slot lifetimes,
   alignment, allocator compatibility, and the mutation paths.
+- [docs/perf/move-relocation.md](docs/perf/move-relocation.md): method and measurements
+  of the key-moving relocation.
 - [CHANGELOG.md](CHANGELOG.md): what changed, with the before/after measurements.
 
 ## 🛠️ Testing
