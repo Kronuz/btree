@@ -4,8 +4,8 @@ on:
     branches: [main, master]
   pull_request:
   workflow_dispatch:
-  schedule:
-    - cron: '23 7 * * *'
+    inputs:
+      nightly: { type: boolean, default: false }
 permissions:
   contents: read
 concurrency:
@@ -15,6 +15,7 @@ jobs:
   ci:
     uses: Kronuz/cpp-libraries/.github/workflows/cmake.yml@main
     with:
+      nightly: ${{ inputs.nightly || false }}
       # These containers provide no concurrent mutation API.
       tsan: false
       asan_cxx_flags: -O1 -fsanitize=object-size,pointer-overflow -fno-sanitize-recover=all
