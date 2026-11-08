@@ -19,3 +19,17 @@ The public container operations do not change. Node internals require a complete
 The counting-allocator test checks exact extents and matching deallocation, ordinary short-root capacities, unusually sized values, over-aligned values and allocation failure. Nontrivial values exercise construction, movement and destruction through splitting, merging and root collapse. Run it with sanitizer recovery disabled, then run the existing mixed-mode tests and downstream applications.
 
 Preserve the old revision as the benchmark arm for allocation counts, peak requested bytes and mutation CPU. Compare identical keys, mapped values, insertion/erasure schedules and build flags. Treat an exact footprint change for formerly padded leaves or newly aligned storage separately from timing variation. No performance result follows from source inspection alone.
+
+## Copy and compact-root failure ownership
+
+Copy construction clones the existing topology without reinsertion. Each node publishes its live-value count after successful construction and tracks completed children independently. A failing clone destroys only constructed values and completed child subtrees before returning its allocation. Root parent and rightmost metadata are published after the complete clone succeeds.
+
+Assignment clears its previous tree with the previous allocator, then copies comparator and allocator state before cloning. A failed clone leaves the destination empty; this is a basic exception guarantee, not preservation of its prior contents. The source remains unchanged. Comparator and allocator assignment retain their existing contracts.
+
+Compact leaf growth stages replacement values with `move_if_noexcept`, cleans a failed replacement, and publishes the new root only after transfer succeeds. Copyable throwing values keep their original values during failed transfer. Move-only values whose move constructor can throw do not gain a strong value-preservation guarantee. A failed first value construction releases the empty leaf root, restoring the canonical null-root empty state before retry.
+
+These guards do not establish general exception safety for arbitrary throwing split, rebalance, erase or const-key mutation. The positioned tests and downstream sanitizer qualification must distinguish those operations from the bounded copy and compact-growth change.
+
+Topology cloning preserves the source's occupancy rather than compacting it through ordered reinsertion. Measure this separately: `mutation_bench --copy` and `--copy-pruned` report process CPU plus source/copy container bytes for populated and erase-thinned trees. Container bytes exclude heap storage owned by mapped strings and are not RSS. Compile the same benchmark source against both header revisions; the default mutation workload remains unchanged.
+
+Logical root size advances after successful leaf insertion. A failed tail-value construction on a multilevel tree leaves its size unchanged. When promoting a full leaf root, allocate the new root and sibling before linking either; refusal of the sibling allocation frees the unpublished root. These bounded changes do not repair separator-transfer failures or internal-root promotion.

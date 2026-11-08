@@ -921,8 +921,11 @@ public:
 	}
 
 	static btree_node* init_root(void* storage, btree_node* parent) {
+		return init_root(storage, parent, parent->count());
+	}
+	static btree_node* init_root(void* storage, btree_node* parent, size_type size) {
 		btree_node* n = init_internal(storage, parent);
-		::new (static_cast<void*>(n->storage() + root_offset())) root_metadata{parent, parent->count()};
+		::new (static_cast<void*>(n->storage() + root_offset())) root_metadata{parent, size};
 		return n;
 	}
 
@@ -933,6 +936,7 @@ public:
 	}
 
 private:
+	template <typename> friend class btree;
 	btree_node(btree_node* parent, int capacity)
 		: fields_{true, 0, static_cast<typename base_fields::field_type>(capacity), 0, parent} {}
 	char* storage() { return reinterpret_cast<char*>(this); }
@@ -1734,6 +1738,50 @@ private:
 		deallocate_node(node, node_type::leaf_size(node->max_count()));
 	}
 
+	node_type* clone_subtree(const node_type* source, node_type* parent, bool root_node) {
+		node_type* result;
+		if (source->is_leaf()) {
+			result = node_type::init_leaf(allocate_node(node_type::leaf_size(source->max_count())), parent, source->max_count());
+		} else if (root_node) {
+			result = node_type::init_root(allocate_node(node_type::root_size()), parent, source->size());
+		} else {
+			result = new_internal_node(parent);
+		}
+		int children = 0;
+		try {
+			for (int i = 0; i < source->count(); ++i) {
+				result->construct_value(i, source->value(i));
+				result->set_count(i + 1);
+			}
+			if (!source->is_leaf()) {
+				for (int i = 0; i <= source->count(); ++i) {
+					result->set_child(i, clone_subtree(source->child(i), result, false));
+					++children;
+				}
+			}
+		} catch (...) {
+			for (int i = 0; i < children; ++i) internal_clear(result->child(i));
+			if (result->is_leaf()) delete_leaf_node(result);
+			else deallocate_node(result, root_node ? node_type::root_size() : node_type::internal_size());
+			throw;
+		}
+		return result;
+	}
+
+	node_type* clone_root(const node_type* source) {
+		if (!source) return nullptr;
+		auto result = clone_subtree(source, nullptr, true);
+		auto first = result;
+		while (!first->is_leaf()) first = first->child(0);
+		result->fields_.parent = first;
+		if (!result->is_leaf()) {
+			auto last = result;
+			while (!last->is_leaf()) last = last->child(last->count());
+			result->__rightmost() = last;
+		}
+		return result;
+	}
+
 	// Rebalances or splits the node iter points to.
 	void rebalance_or_split(iterator& iter);
 
@@ -2232,7 +2280,7 @@ btree<P>::btree(const self_type& x)
 template <typename P> template <typename... Args>
 std::pair<typename btree<P>::iterator, bool>
 btree<P>::emplace_unique_key_args(const key_type& key, Args&&... args) {
-	if (empty()) {
+	if (root() == nullptr) {
 		__root() = new_leaf_root_node(1);
 	}
 
@@ -2280,7 +2328,7 @@ btree<P>::emplace_hint_unique_key_args(const_iterator hint, const key_type& key,
 template <typename P> template <typename... Args>
 typename btree<P>::iterator
 btree<P>::emplace_multi_key_args(const key_type& key, Args&&... args) {
-	if (empty()) {
+	if (root() == nullptr) {
 		__root() = new_leaf_root_node(1);
 	}
 
@@ -2320,17 +2368,7 @@ void btree<P>::assign(const self_type& x) {
 	__key_comp() = x.key_comp();
 	__internal_allocator() = x.internal_allocator();
 
-	// Assignment can avoid key comparisons because we know the order of the
-	// values is the same order we'll store them in.
-	for (const_iterator iter = x.begin(); iter != x.end(); ++iter) {
-		if (empty()) {
-			emplace_multi(*iter);
-		} else {
-			// If the btree is not empty, we can just insert the new value at the end
-			// of the tree!
-			internal_emplace(end(), *iter);
-		}
-	}
+	__root() = clone_root(x.root());
 }
 
 template <typename P>
@@ -2461,6 +2499,7 @@ void btree<P>::rebalance_or_split(iterator& iter) {
 	node_type*& node = iter.node;
 	int& insert_position = iter.position;
 	assert(node->count() == node->max_count());
+	node_type* split_node = nullptr;
 
 	// First try to make room on the node by rebalancing.
 	node_type* parent = node->get_parent();
@@ -2531,6 +2570,12 @@ void btree<P>::rebalance_or_split(iterator& iter) {
 			// The root node is currently a leaf node: create a new root node and set
 			// the current root node as the child of the new root.
 			parent = new_internal_root_node();
+			try {
+				split_node = new_leaf_node(parent);
+			} catch (...) {
+				deallocate_node(parent, node_type::root_size());
+				throw;
+			}
 			parent->set_child(0, root());
 			__root() = parent;
 			assert(__rightmost() == parent->child(0));
@@ -2547,9 +2592,8 @@ void btree<P>::rebalance_or_split(iterator& iter) {
 	}
 
 	// Split the node.
-	node_type* split_node;
 	if (node->is_leaf()) {
-		split_node = new_leaf_node(parent);
+		if (!split_node) split_node = new_leaf_node(parent);
 		node->split(split_node, insert_position);
 		if (rightmost() == node) {
 			__rightmost() = split_node;
@@ -2681,18 +2725,32 @@ btree<P>::internal_emplace(const_iterator hint, Args&&... args) {
 			// Insertion into the root where the root is smaller that the full node
 			// size. Simply grow the size of the root node.
 			assert(iter.node == root());
-			iter.node = new_leaf_root_node(std::min<int>(kNodeValues, 2 * iter.node->max_count()));
-			iter.node->swap(root());
+			auto replacement = new_leaf_root_node(std::min<int>(kNodeValues, 2 * iter.node->max_count()));
+			try {
+				for (int i = 0; i < root()->count(); ++i) {
+					replacement->construct_value(i, std::move_if_noexcept(root()->value(i)));
+					replacement->set_count(i + 1);
+				}
+			} catch (...) {
+				delete_leaf_node(replacement);
+				throw;
+			}
 			delete_leaf_node(root());
-			__root() = iter.node;
+			__root() = iter.node = replacement;
 		} else {
 			rebalance_or_split(iter);
-			++__size();
 		}
-	} else if (!root()->is_leaf()) {
-		++__size();
 	}
-	iter.node->insert_value(iter.position, std::forward<Args>(args)...);
+	try {
+		iter.node->insert_value(iter.position, std::forward<Args>(args)...);
+	} catch (...) {
+		if (root()->is_leaf() && root()->count() == 0) {
+			delete_leaf_node(root());
+			__root() = nullptr;
+		}
+		throw;
+	}
+	if (!root()->is_leaf()) ++__size();
 	return iter;
 }
 
