@@ -33,6 +33,7 @@ It builds as C++17 or C++20.
 
 #include <cassert>
 #include <string>
+#include <utility>
 
 int main() {
 	btree::map<int, std::string> m;
@@ -40,8 +41,21 @@ int main() {
 	m.try_emplace(1, "one");
 	assert(m.begin()->second == "one");   // ordered, like std::map
 	assert(m.count(2) == 1);
+	auto moved = std::move(m);
+	assert(m.empty() && moved.size() == 2);
+	m.emplace(3, "reused");
 }
 ```
+
+## Ownership and failure guarantees
+
+All four container families support ownership moves. The source becomes empty and remains reusable; nodes and element objects retain their addresses during the move. Iterator invalidation on later insertion/erasure is unchanged. Move preparation copies comparator and allocator state before transferring nodes, with conditional `noexcept` based on those actual operations.
+
+Allocator state travels with the tree, including unequal stateful allocators. This retains cpp-btree's legacy propagation policy: copy assignment and member swap already propagate or exchange allocator state. It is not a claim of standard allocator-trait conformance. A move assignment destroys the destination's old tree with its original allocator before preparation; if preparation throws, the destination is empty and the source still owns its tree.
+
+Copies use guarded compact ordered construction without comparisons or reinsertion. Insertion stages affected nodes and publishes their links and size after preparation. Throwing move-only mapped values can remain moved-from after failure; a failed consuming move of a move-only set key clears the container. Explicitly moving contained arguments can consume them before a later failure. See [node ownership](docs/NODE_LAYOUT.md) for aliasing contracts, erase/merge limitations and qualification requirements.
+
+Duplicate-key `emplace()` returns an iterator, matching its underlying insertion routine. Its previous `pair<iterator, bool>` declaration could not compile when instantiated; code that inspected that former declaration must update its expected return type. Rebuild consumers after changing header revisions.
 
 ## 🎯 When to use it
 

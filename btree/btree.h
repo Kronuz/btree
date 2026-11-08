@@ -124,21 +124,13 @@
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
+#include <vector>
+
+#include "node_ops.h"
+#include "drain_state.h"
+#include "mutation_images.h"
 
 namespace btree {
-
-// Inside a btree method, if we just call swap(), it will choose the
-// btree::swap method, which we don't want. And we can't say ::swap
-// because then MSVC won't pickup any std::swap() implementations. We
-// can't just use std::swap() directly because then we don't get the
-// specialization for types outside the std namespace. So the solution
-// is to have a special swap helper function whose name doesn't
-// collide with other swap functions defined by the btree classes.
-template <typename T>
-inline void btree_swap_helper(T& a, T& b) {
-	using std::swap;
-	swap(a, b);
-}
 
 // Types small_ and big_ are promise that sizeof(small_) < sizeof(big_)
 typedef char small_;
@@ -213,18 +205,16 @@ struct btree_is_transparent<Compare, std::void_t<typename Compare::is_transparen
 // with common comparison functors.
 template <typename Compare>
 struct btree_key_compare_to_adapter : Compare {
-	btree_key_compare_to_adapter() { }
-	btree_key_compare_to_adapter(const Compare& c) : Compare(c) { }
-	btree_key_compare_to_adapter(const btree_key_compare_to_adapter<Compare>& c)
-		: Compare(c) {
-	}
+	btree_key_compare_to_adapter() = default;
+	btree_key_compare_to_adapter(const Compare& c) noexcept(std::is_nothrow_copy_constructible<Compare>::value) : Compare(c) { }
+	btree_key_compare_to_adapter(const btree_key_compare_to_adapter<Compare>&) = default;
 };
 
 template <>
 struct btree_key_compare_to_adapter<std::less<std::string>> : public btree_key_compare_to_tag {
-	btree_key_compare_to_adapter() { }
-	btree_key_compare_to_adapter(const std::less<std::string>&) { }
-	btree_key_compare_to_adapter(const btree_key_compare_to_adapter<std::less<std::string>>&) { }
+	btree_key_compare_to_adapter() noexcept { }
+	btree_key_compare_to_adapter(const std::less<std::string>&) noexcept { }
+	btree_key_compare_to_adapter(const btree_key_compare_to_adapter<std::less<std::string>>&) noexcept { }
 	int operator()(const std::string& a, const std::string& b) const {
 		return a.compare(b);
 	}
@@ -232,9 +222,9 @@ struct btree_key_compare_to_adapter<std::less<std::string>> : public btree_key_c
 
 template <>
 struct btree_key_compare_to_adapter<std::greater<std::string>> : public btree_key_compare_to_tag {
-	btree_key_compare_to_adapter() { }
-	btree_key_compare_to_adapter(const std::greater<std::string>&) { }
-	btree_key_compare_to_adapter(const btree_key_compare_to_adapter<std::greater<std::string>>&) { }
+	btree_key_compare_to_adapter() noexcept { }
+	btree_key_compare_to_adapter(const std::greater<std::string>&) noexcept { }
+	btree_key_compare_to_adapter(const btree_key_compare_to_adapter<std::greater<std::string>>&) noexcept { }
 	int operator()(const std::string& a, const std::string& b) const {
 		return b.compare(a);
 	}
@@ -335,11 +325,6 @@ struct btree_map_params : public btree_common_params<Key, Compare, Alloc, Target
 		kValueSize = sizeof(Key) + sizeof(data_type),
 	};
 
-	static void swap(value_type& a, value_type& b) {
-		btree_swap_helper(const_cast<Key&>(a.first), const_cast<Key&>(b.first));
-		btree_swap_helper(a.second, b.second);
-	}
-
 	static const Key& get_key(const value_type& x) {
 		return x.first;
 	}
@@ -359,10 +344,6 @@ struct btree_set_params : public btree_common_params<Key, Compare, Alloc, Target
 	enum {
 		kValueSize = sizeof(Key),
 	};
-
-	static void swap(value_type& a, value_type& b) {
-		btree_swap_helper(a, b);
-	}
 
 	static const Key& get_key(const value_type& x) {
 		return x;
@@ -635,45 +616,6 @@ public:
 		return reinterpret_cast<const_reference>(slot_value(i));
 	}
 
-	// Swap value i in this node with value j in node x.
-	void swap_value(int i, btree_node* x, int j) {
-		assert(x != this || i != j);
-		params_type::swap(slot_value(i), x->slot_value(j));
-	}
-
-	// Swap value i in this node with value i in node x.
-	void swap_value(int i, btree_node* x) {
-		assert(x != this);
-		params_type::swap(slot_value(i), x->slot_value(i));
-	}
-
-	// Swap value i with value j.
-	void swap_value(int i, int j) {
-		assert(i != j);
-		params_type::swap(slot_value(i), slot_value(j));
-	}
-
-	// Move value i in this node to value j in node x.
-	void move_value(int i, btree_node* x, int j) {
-		assert(x != this || i != j);
-		x->construct_value(j, std::move(slot_value(i)));
-		destroy_value(i);
-	}
-
-	// Move value i in this node to value i in node x.
-	void move_value(int i, btree_node* x) {
-		assert(x != this);
-		x->construct_value(i, std::move(slot_value(i)));
-		destroy_value(i);
-	}
-
-	// Move value i to value j.
-	void move_value(int i, int j) {
-		assert(i != j);
-		construct_value(j, std::move(slot_value(i)));
-		destroy_value(i);
-	}
-
 	// Getters/setter for the child at position i in the node.
 	btree_node* child(int i) const {
 		assert(!is_leaf());
@@ -691,82 +633,6 @@ public:
 		slot_child(i) = c;
 		c->fields_.parent = this;
 		c->fields_.position = i;
-	}
-
-	// Swap child i in this node with child j in node x.
-	void swap_child(int i, btree_node* x, int j) {
-		assert(x != this || i != j);
-		assert(!is_leaf());
-		assert(!x->is_leaf());
-		assert(slot_child(i) != nullptr);
-		assert(x->slot_child(j) != nullptr);
-		auto& a = slot_child(i);
-		auto& b = x->slot_child(j);
-		btree_swap_helper(a, b);
-		a->fields_.parent = this;
-		a->fields_.position = i;
-		b->fields_.parent = x;
-		b->fields_.position = j;
-	}
-
-	// Swap child i in this node with child i in node x.
-	void swap_child(int i, btree_node* x) {
-		assert(x != this);
-		assert(!is_leaf());
-		assert(!x->is_leaf());
-		assert(slot_child(i) != nullptr);
-		assert(x->slot_child(i) != nullptr);
-		auto& a = slot_child(i);
-		auto& b = x->slot_child(i);
-		btree_swap_helper(a, b);
-		a->fields_.parent = this;
-		b->fields_.parent = x;
-	}
-
-	// Swap child i with child j.
-	void swap_child(int i, int j) {
-		assert(i != j);
-		assert(!is_leaf());
-		assert(slot_child(i) != nullptr);
-		assert(slot_child(j) != nullptr);
-		auto& a = slot_child(i);
-		auto& b = slot_child(j);
-		btree_swap_helper(a, b);
-		a->fields_.position = i;
-		b->fields_.position = j;
-	}
-
-	// Move child i in this node to child j in node x.
-	void move_child(int i, btree_node* x, int j) {
-		assert(x != this || i != j);
-		assert(!is_leaf());
-		assert(!x->is_leaf());
-		assert(slot_child(i) != nullptr);
-		auto c = slot_child(i);
-		x->slot_child(j) = c;
-		c->fields_.position = j;
-		c->fields_.parent = x;
-	}
-
-	// Move child i in this node to child i in node x.
-	void move_child(int i, btree_node* x) {
-		assert(x != this);
-		assert(!is_leaf());
-		assert(!x->is_leaf());
-		assert(slot_child(i) != nullptr);
-		auto c = slot_child(i);
-		x->slot_child(i) = c;
-		c->fields_.parent = x;
-	}
-
-	// Move child i to child j.
-	void move_child(int i, int j) {
-		assert(i != j);
-		assert(!is_leaf());
-		assert(slot_child(i) != nullptr);
-		auto c = slot_child(i);
-		slot_child(j) = c;
-		c->fields_.position = j;
 	}
 
 	// Returns the position of the first value whose key is not less than k.
@@ -884,28 +750,9 @@ public:
 		return s;
 	}
 
-	// Inserts the value x at position i, shifting all existing values
-	// and children at positions >= i to the right by 1.
+	// Appends a value after all live slots.
 	template <typename... Args>
 	void insert_value(int i, Args&&... args);
-
-	// Removes the value at position i, shifting all existing values
-	// and children at positions > i to the left by 1.
-	void remove_value(int i);
-
-	// Rebalances a node with its right sibling.
-	void rebalance_right_to_left(btree_node* sibling, int to_move);
-	void rebalance_left_to_right(btree_node* sibling, int to_move);
-
-	// Splits a node, moving a portion of the node's values to its right sibling.
-	void split(btree_node* sibling, int insert_position);
-
-	// Merges a node with its right sibling, moving all of the values
-	// and the delimiting key in the parent node onto itself.
-	void merge(btree_node* sibling);
-
-	// Swap the contents of "this" and "src".
-	void swap(btree_node* src);
 
 	// Node allocation/deletion routines.
 	static btree_node* init_leaf(void* storage, btree_node* parent, int max_count) {
@@ -921,8 +768,11 @@ public:
 	}
 
 	static btree_node* init_root(void* storage, btree_node* parent) {
+		return init_root(storage, parent, parent->count());
+	}
+	static btree_node* init_root(void* storage, btree_node* parent, size_type size) {
 		btree_node* n = init_internal(storage, parent);
-		::new (static_cast<void*>(n->storage() + root_offset())) root_metadata{parent, parent->count()};
+		::new (static_cast<void*>(n->storage() + root_offset())) root_metadata{parent, size};
 		return n;
 	}
 
@@ -933,6 +783,10 @@ public:
 	}
 
 private:
+	template <typename> friend class btree;
+	template <typename> friend class detail::drain_state;
+	template <typename N, typename... Args> friend void detail::insert_value(N*, int, Args&&...);
+	template <typename N> friend void detail::split(N*, N*, int);
 	btree_node(btree_node* parent, int capacity)
 		: fields_{true, 0, static_cast<typename base_fields::field_type>(capacity), 0, parent} {}
 	char* storage() { return reinterpret_cast<char*>(this); }
@@ -1109,6 +963,7 @@ private:
 	int position;
 
 	template <typename> friend class btree;
+	template <typename Context, typename Cursor> friend void detail::rebalance_or_split(Context&, Cursor&);
 	friend iterator;
 	friend const_iterator;
 };
@@ -1208,11 +1063,17 @@ public:
 	typedef std::allocator_traits<internal_allocator_type> internal_allocator_traits;
 
 public:
+	class drain_cursor;
+	using drain_type = drain_cursor;
+	drain_type drain() noexcept(std::is_nothrow_copy_constructible<internal_allocator_type>::value);
+
 	// Default constructor.
 	btree(const key_compare& comp, const allocator_type& alloc);
 
 	// Copy constructor.
 	btree(const self_type& x);
+	btree(self_type&& x) noexcept(std::is_nothrow_copy_constructible<key_compare>::value &&
+		std::is_nothrow_copy_constructible<internal_allocator_type>::value);
 
 	// Destructor.
 	~btree() {
@@ -1336,7 +1197,7 @@ public:
 	iterator emplace_hint_unique_key_args(const_iterator hint, const key_type& key, Args&&... args);
 
 	template <typename P>
-	std::pair<iterator, bool> emplace_hint_unique(const_iterator hint, P&& x) {
+	iterator emplace_hint_unique(const_iterator hint, P&& x) {
 		return emplace_hint_unique_extract_key(hint, std::forward<P>(x), btree_can_extract_key<P, key_type>());
 	}
 
@@ -1519,7 +1380,7 @@ public:
 	}
 	// Returns a count of the number of times the key appears in the btree.
 	size_type count_multi(const key_type& key) const {
-		return distance(lower_bound(key), upper_bound(key));
+		return std::distance(lower_bound(key), upper_bound(key));
 	}
 
 	// Clear the btree, deleting all of the values it contains.
@@ -1535,6 +1396,17 @@ public:
 			return *this;
 		}
 		assign(x);
+		return *this;
+	}
+
+	self_type& operator=(self_type&& x) noexcept(std::is_nothrow_copy_assignable<key_compare>::value &&
+		std::is_nothrow_copy_assignable<internal_allocator_type>::value) {
+		if (&x == this) return *this;
+		clear();
+		__key_comp() = x.key_comp();
+		__internal_allocator() = x.internal_allocator();
+		__root() = x.root();
+		x.__root() = nullptr;
 		return *this;
 	}
 
@@ -1713,42 +1585,84 @@ private:
 	node_type* new_internal_node(node_type* parent) {
 		return node_type::init_internal(allocate_node(node_type::internal_size()), parent);
 	}
-	node_type* new_internal_root_node() {
-		return node_type::init_root(allocate_node(node_type::root_size()), root()->get_parent());
-	}
-	node_type* new_leaf_node(node_type* parent) {
-		return node_type::init_leaf(allocate_node(node_type::leaf_size(kNodeValues)), parent, kNodeValues);
-	}
 	node_type* new_leaf_root_node(int max_count) {
 		void* storage = allocate_node(node_type::leaf_size(max_count));
 		return node_type::init_leaf(storage, static_cast<node_type*>(storage), max_count);
-	}
-	void delete_internal_node(node_type* node) {
-		assert(node != root());
-		deallocate_node(node, node_type::internal_size());
-	}
-	void delete_internal_root_node() {
-		deallocate_node(root(), node_type::root_size());
 	}
 	void delete_leaf_node(node_type* node) {
 		deallocate_node(node, node_type::leaf_size(node->max_count()));
 	}
 
-	// Rebalances or splits the node iter points to.
-	void rebalance_or_split(iterator& iter);
+	struct copy_level {
+		size_type nodes;
+		size_type next = 0;
+	};
+	using copy_level_allocator = typename internal_allocator_traits::template rebind_alloc<copy_level>;
+	using copy_plan = std::vector<copy_level, copy_level_allocator>;
 
-	// Merges the values of left, right and the delimiting key on their parent
-	// onto left, removing the delimiting key and deleting right.
-	void merge_nodes(node_type* left, node_type* right);
+	node_type* build_ordered_copy(const_iterator& source, copy_plan& levels, std::size_t height,
+		size_type leaf_values, node_type* parent, bool root_node) {
+		const auto ordinal = levels[height].next++;
+		int count;
+		node_type* result;
+		if (height == 0) {
+			count = static_cast<int>(leaf_values / levels[0].nodes + (ordinal < leaf_values % levels[0].nodes));
+			int capacity = kNodeValues;
+			if (root_node) {
+				capacity = 1;
+				while (capacity < count) capacity = std::min<int>(kNodeValues, capacity * 2);
+			}
+			result = node_type::init_leaf(allocate_node(node_type::leaf_size(capacity)), parent, capacity);
+		} else {
+			const auto children = levels[height - 1].nodes;
+			count = static_cast<int>(children / levels[height].nodes +
+				(ordinal < children % levels[height].nodes)) - 1;
+			result = root_node ? node_type::init_root(allocate_node(node_type::root_size()), parent, 0)
+				: new_internal_node(parent);
+		}
+		int children = 0;
+		try {
+			for (int i = 0; i <= count; ++i) {
+				if (height != 0) {
+					result->set_child(i, build_ordered_copy(source, levels, height - 1, leaf_values, result, false));
+					++children;
+				}
+				if (i != count) {
+					result->construct_value(i, *source);
+					result->set_count(i + 1);
+					++source;
+				}
+			}
+		} catch (...) {
+			for (int i = 0; i < children; ++i) internal_clear(result->child(i));
+			if (result->is_leaf()) delete_leaf_node(result);
+			else deallocate_node(result, root_node ? node_type::root_size() : node_type::internal_size());
+			throw;
+		}
+		return result;
+	}
 
-	// Tries to merge node with its left or right sibling, and failing that,
-	// rebalance with its left or right sibling. Returns true if a merge
-	// occurred, at which point it is no longer valid to access node. Returns
-	// false if no merging took place.
-	bool try_merge_or_rebalance(const_iterator& iter);
-
-	// Tries to shrink the height of the tree by 1.
-	void try_shrink();
+	node_type* copy_root(const self_type& source) {
+		const auto size = source.size();
+		if (size == 0) return nullptr;
+		copy_plan levels{copy_level_allocator(internal_allocator())};
+		const auto leaves = size / (kNodeValues + 1) + 1;
+		levels.push_back({leaves});
+		while (levels.back().nodes > 1)
+			levels.push_back({1 + (levels.back().nodes - 1) / (kNodeValues + 1)});
+		auto iterator = source.begin();
+		auto result = build_ordered_copy(iterator, levels, levels.size() - 1, size - leaves + 1, nullptr, true);
+		auto first = result;
+		while (!first->is_leaf()) first = first->child(0);
+		result->fields_.parent = first;
+		if (!result->is_leaf()) {
+			auto last = result;
+			while (!last->is_leaf()) last = last->child(last->count());
+			result->__rightmost() = last;
+			result->__size() = size;
+		}
+		return result;
+	}
 
 	iterator internal_end(const_iterator iter) {
 		return iter.node ? iterator(iter.node, iter.position) : end();
@@ -1844,6 +1758,7 @@ private:
 	}
 
 private:
+	class mutation_transaction;
 	empty_base_handle<internal_allocator_type, node_type*> root_;
 
 private:
@@ -1857,17 +1772,14 @@ private:
 		big_,
 		small_> key_compare_checker(R);
 
-	// A never instantiated helper function that returns the key comparison
-	// functor.
-	static key_compare key_compare_helper();
-
 	// Verify that key_compare returns a bool. This is similar to the way
 	// is_convertible in base/type_traits.h works. Note that key_compare_checker
 	// is never actually invoked. The compiler will select which
 	// key_compare_checker() to instantiate and then figure out the size of the
 	// return type of key_compare_checker() at compile time which we then check
 	// against the sizeof of big_.
-	static_assert(sizeof(key_compare_checker(key_compare_helper()(key_type(), key_type()))) == sizeof(big_),
+	static_assert(sizeof(key_compare_checker(std::declval<key_compare>()(
+		std::declval<key_type>(), std::declval<key_type>()))) == sizeof(big_),
 		"key_comparison_function_must_return_bool");
 
 	// Note: We insist on kTargetValues, which is computed from
@@ -1880,273 +1792,18 @@ private:
 		"node_space_assumption_incorrect");
 };
 
+} // namespace btree
+#include "mutation_transaction.h"
+#include "drain_cursor.h"
+namespace btree {
+
 ////
 // btree_node methods
 template <typename P> template <typename... Args>
 inline void btree_node<P>::insert_value(int i, Args&&... args) {
-	auto cnt = count();
-
-	assert(i <= cnt);
-
-	// Initialize new value at the end.
-	construct_value(cnt, std::forward<Args>(args)...);
-
-	// Move initialized value to the correct position.
-	if (cnt > i) {
-		if (is_leaf()) {
-			for (int j = cnt; j > i; --j) {
-				swap_value(j - 1, j);
-			}
-		} else {
-			for (int j = cnt; j > i; --j) {
-				swap_value(j - 1, j);
-				move_child(j, j + 1);
-			}
-		}
-	}
-
-	// Increase number of items
-	set_count(cnt + 1);
-}
-
-template <typename P>
-inline void btree_node<P>::remove_value(int i) {
-	auto cnt = count();
-
-	// Move the value to the end.
-	if (is_leaf()) {
-		for (int j = i + 1; j < cnt; ++j) {
-			swap_value(j, j - 1);
-		}
-	} else {
-		assert(child(i + 1)->count() == 0);
-		for (int j = i + 1; j < cnt; ++j) {
-			swap_value(j, j - 1);
-			move_child(j + 1, j);
-		}
-		reset_child(cnt);
-	}
-
-	// Decrease number of items.
-	set_count(--cnt);
-
-	// Finally, destroy value.
-	destroy_value(cnt);
-}
-
-template <typename P>
-void btree_node<P>::rebalance_right_to_left(btree_node* src, int to_move) {
-	auto cnt = count();
-	auto src_cnt = src->count();
-
-	assert(get_parent() == src->get_parent());
-	assert(position() + 1 == src->position());
-	assert(src_cnt >= cnt);
-	assert(to_move >= 1);
-	assert(to_move <= src_cnt);
-
-	// Move the delimiting value to the left node.
-	get_parent()->move_value(position(), this, cnt);
-
-	// Move the new delimiting value from the right node.
-	src->move_value(to_move - 1, get_parent(), position());
-
-	if (is_leaf()) {
-		// Move the values from the right to the left node.
-		for (int i = 1; i < to_move; ++i) {
-			src->move_value(i - 1, this, cnt + i);
-		}
-		// Shift the values in the right node to their correct position.
-		for (int i = to_move; i < src_cnt; ++i) {
-			src->move_value(i, i - to_move);
-		}
-	} else {
-		// Move the values and child pointsts from the right to the left node.
-		src->move_child(0, this, 1 + cnt);
-		for (int i = 1; i < to_move; ++i) {
-			src->move_value(i - 1, this, cnt + i);
-			src->move_child(i, this, 1 + cnt + i);
-		}
-		// Shift the values and child pointsts in the right node to their correct position.
-		for (int i = to_move; i < src_cnt; ++i) {
-			src->move_value(i, i - to_move);
-			src->move_child(i, i - to_move);
-		}
-		src->move_child(src_cnt, src_cnt - to_move);
-	}
-
-	// Fixup the counts on the src and dst nodes.
-	set_count(cnt + to_move);
-	src->set_count(src_cnt - to_move);
-}
-
-template <typename P>
-void btree_node<P>::rebalance_left_to_right(btree_node* dst, int to_move) {
-	auto cnt = count();
-	auto dst_cnt = dst->count();
-
-	assert(get_parent() == dst->get_parent());
-	assert(position() + 1 == dst->position());
-	assert(cnt >= dst_cnt);
-	assert(to_move >= 1);
-	assert(to_move <= cnt);
-
-	// Make room in the right node for the new values.
-	for (int i = dst_cnt - 1; i >= 0; --i) {
-		dst->move_value(i, i + to_move);
-	}
-
-	// Move the delimiting value to the right node.
-	get_parent()->move_value(position(), dst, to_move - 1);
-
-	// Move the new delimiting value from the left node.
-	this->move_value(cnt - to_move, get_parent(), position());
-
-	if (is_leaf()) {
-		// Move the values from the left to the right node.
-		for (int i = 1; i < to_move; ++i) {
-			move_value(cnt - to_move + i, dst, i - 1);
-		}
-	} else {
-		// Move the values and child pointers from the left to the right node.
-		for (int i = dst_cnt; i >= 0; --i) {
-			dst->move_child(i, i + to_move);
-		}
-		// Move the values and child pointers from the left to the right node.
-		for (int i = 1; i < to_move; ++i) {
-			move_value(cnt - to_move + i, dst, i - 1);
-			move_child(cnt - to_move + i, dst, i - 1);
-		}
-		move_child(cnt, dst, to_move - 1);
-	}
-
-	// Fixup the counts on the src and dst nodes.
-	set_count(cnt - to_move);
-	dst->set_count(dst_cnt + to_move);
-}
-
-template <typename P>
-void btree_node<P>::split(btree_node* dst, int insert_position) {
-	auto cnt = count();
-	auto dst_cnt = dst->count();
-
-	assert(dst_cnt == 0);
-
-	// We bias the split based on the position being inserted. If we're
-	// inserting at the beginning of the left node then bias the split to put
-	// more values on the right node. If we're inserting at the end of the
-	// right node then bias the split to put more values on the left node.
-	if (insert_position == 0) {
-		dst_cnt = cnt - 1;
-		dst->set_count(dst_cnt);
-	} else if (insert_position != max_count()) {
-		dst_cnt = cnt / 2;
-		dst->set_count(dst_cnt);
-	}
-	assert(cnt > dst_cnt);
-	cnt -= dst_cnt;
-	set_count(cnt);
-
-	if (is_leaf()) {
-		// Move values from the left sibling to the right sibling.
-		for (int i = 0; i < dst_cnt; ++i) {
-			move_value(cnt + i, dst, i);
-		}
-	} else {
-		// Move values and child pointers from the left sibling to the right sibling.
-		for (int i = 0; i < dst_cnt; ++i) {
-			move_value(cnt + i, dst, i);
-			move_child(cnt + i, dst, i);
-		}
-		move_child(cnt + dst_cnt, dst, dst_cnt);
-	}
-
-	// The split key is the largest value in the left sibling.
-	set_count(--cnt);
-	get_parent()->insert_value(position(), std::move(value(cnt)));
-	destroy_value(cnt);
-	get_parent()->set_child(position() + 1, dst);
-}
-
-template <typename P>
-void btree_node<P>::merge(btree_node* src) {
-	auto cnt = count();
-	auto src_cnt = src->count();
-	auto parent = get_parent();
-	auto parent_cnt = parent->count();
-
-	assert(parent == src->get_parent());
-	assert(position() + 1 == src->position());
-
-	// Move the delimiting value to the left node.
-	parent->move_value(position(), this, cnt);
-
-	// Shift the values in the parent node to their correct position.
-	for (int i = position() + 1; i < parent_cnt; ++i) {
-		parent->move_value(i, i - 1);
-		parent->move_child(i + 1, i);
-	}
-	parent->reset_child(parent_cnt);
-
-	if (is_leaf()) {
-		// Move the values from the right to the left node.
-		for (int i = 0; i < src_cnt; ++i) {
-			src->move_value(i, this, 1 + cnt + i);
-		}
-	} else {
-		// Move the values and child pointers from the right to the left node.
-		for (int i = 0; i < src_cnt; ++i) {
-			src->move_value(i, this, 1 + cnt + i);
-			src->move_child(i, this, 1 + cnt + i);
-		}
-		src->move_child(src_cnt, this, 1 + cnt + src_cnt);
-	}
-
-	// Fixup the counts on the parent, src and dst nodes.
-	parent->set_count(parent_cnt - 1);
-	set_count(1 + cnt + src_cnt);
-	src->set_count(0);
-}
-
-template <typename P>
-void btree_node<P>::swap(btree_node* x) {
-	auto cnt = count();
-	auto x_cnt = x->count();
-
-	int min = std::min(cnt, x_cnt);
-
-	assert(is_leaf() == x->is_leaf());
-
-	if (is_leaf()) {
-		// Swap the values.
-		for (int i = 0; i < min; ++i) {
-			swap_value(i, x);
-		}
-		for (int i = min; i < x_cnt; ++i) {
-			x->move_value(i, this);
-		}
-		for (int i = min; i < cnt; ++i) {
-			move_value(i, x);
-		}
-	} else {
-		// Swap the values and child pointers.
-		for (int i = 0; i < min; ++i) {
-			swap_value(i, x);
-			swap_child(i, x);
-		}
-		swap_child(min, x);
-		for (int i = min; i < x_cnt; ++i) {
-			x->move_value(i, this);
-			x->move_child(i + 1, this);
-		}
-		for (int i = min; i < cnt; ++i) {
-			move_value(i, x);
-			move_child(i + 1, x);
-		}
-	}
-
-	// Swap the counts.
-	btree_swap_helper(fields_.count, x->fields_.count);
+	assert(i == count() && i < max_count());
+	construct_value(i, std::forward<Args>(args)...);
+	set_count(i + 1);
 }
 
 ////
@@ -2229,11 +1886,19 @@ btree<P>::btree(const self_type& x)
 	assign(x);
 }
 
+template <typename P>
+btree<P>::btree(self_type&& x) noexcept(std::is_nothrow_copy_constructible<key_compare>::value &&
+	std::is_nothrow_copy_constructible<internal_allocator_type>::value)
+	: key_compare(x.key_comp()), root_(x.internal_allocator(), x.root()) {
+	x.__root() = nullptr;
+}
+
 template <typename P> template <typename... Args>
 std::pair<typename btree<P>::iterator, bool>
 btree<P>::emplace_unique_key_args(const key_type& key, Args&&... args) {
-	if (empty()) {
+	if (root() == nullptr) {
 		__root() = new_leaf_root_node(1);
+		return std::make_pair(internal_emplace(iterator(root(), 0), std::forward<Args>(args)...), true);
 	}
 
 	std::pair<iterator, int> res = internal_locate(key, iterator(root(), 0));
@@ -2280,8 +1945,9 @@ btree<P>::emplace_hint_unique_key_args(const_iterator hint, const key_type& key,
 template <typename P> template <typename... Args>
 typename btree<P>::iterator
 btree<P>::emplace_multi_key_args(const key_type& key, Args&&... args) {
-	if (empty()) {
+	if (root() == nullptr) {
 		__root() = new_leaf_root_node(1);
+		return internal_emplace(iterator(root(), 0), std::forward<Args>(args)...);
 	}
 
 	iterator iter = internal_upper_bound(key, iterator(root(), 0));
@@ -2320,84 +1986,20 @@ void btree<P>::assign(const self_type& x) {
 	__key_comp() = x.key_comp();
 	__internal_allocator() = x.internal_allocator();
 
-	// Assignment can avoid key comparisons because we know the order of the
-	// values is the same order we'll store them in.
-	for (const_iterator iter = x.begin(); iter != x.end(); ++iter) {
-		if (empty()) {
-			emplace_multi(*iter);
-		} else {
-			// If the btree is not empty, we can just insert the new value at the end
-			// of the tree!
-			internal_emplace(end(), *iter);
-		}
-	}
+	__root() = copy_root(x);
 }
 
 template <typename P>
 typename btree<P>::iterator btree<P>::erase(const_iterator iter) {
-	bool internal_delete = false;
-	if (!iter.node->is_leaf()) {
-		// Deletion of a value on an internal node. Swap the key with the largest
-		// value of our left child. This is easy, we just decrement iter.
-		const_iterator tmp_iter(iter--);
-		assert(iter.node->is_leaf());
-		assert(!compare_keys(tmp_iter.key(), iter.key()));
-		iter.node->swap_value(iter.position, tmp_iter.node, tmp_iter.position);
-		internal_delete = true;
-		--__size();
-	} else if (!root()->is_leaf()) {
-		--__size();
-	}
-
-	// Delete the key from the leaf.
-	iter.node->remove_value(iter.position);
-
-	// We want to return the next value after the one we just erased. If we
-	// erased from an internal node (internal_delete == true), then the next
-	// value is ++(++iter). If we erased from a leaf node (internal_delete ==
-	// false) then the next value is ++iter. Note that ++iter may point to an
-	// internal node and the value in the internal node may move to a leaf node
-	// (iter.node) when rebalancing is performed at the leaf level.
-
-	// Merge/rebalance as we walk back up the tree.
-	iterator res(iter.node, iter.position);
-	for (;;) {
-		if (iter.node == root()) {
-			try_shrink();
-			if (empty()) {
-				return end();
-			}
-			break;
-		}
-		if (iter.node->count() >= kMinNodeValues) {
-			break;
-		}
-		bool merged = try_merge_or_rebalance(iter);
-		if (iter.node->is_leaf()) {
-			res = iterator(iter.node, iter.position);
-		}
-		if (!merged) {
-			break;
-		}
-		iter.node = iter.node->get_parent();
-	}
-
-	// Adjust our return value. If we're pointing at the end of a node, advance
-	// the iterator.
-	if (res.position == res.node->count()) {
-		res.position = res.node->count() - 1;
-		++res;
-	}
-	// If we erased from an internal node, advance the iterator.
-	if (internal_delete) {
-		++res;
-	}
-	return res;
+	mutation_transaction transaction(*this);
+	return transaction.erase(iterator(iter.node, iter.position));
 }
 
 template <typename P>
 int btree<P>::erase(const_iterator begin, const_iterator end) {
-	int count = distance(begin, end);
+	const auto length = std::distance(begin, end);
+	if (length > std::numeric_limits<int>::max()) throw std::length_error("erase range exceeds return count");
+	const auto count = static_cast<int>(length);
 	for (int i = 0; i < count; i++) {
 		begin = erase(begin);
 	}
@@ -2456,203 +2058,6 @@ void btree<P>::verify() const {
 	}
 }
 
-template <typename P>
-void btree<P>::rebalance_or_split(iterator& iter) {
-	node_type*& node = iter.node;
-	int& insert_position = iter.position;
-	assert(node->count() == node->max_count());
-
-	// First try to make room on the node by rebalancing.
-	node_type* parent = node->get_parent();
-	if (node != root()) {
-		if (node->position() > 0) {
-			// Try rebalancing with our left sibling.
-			node_type* left = parent->child(node->position() - 1);
-			if (left->count() < left->max_count()) {
-				// We bias rebalancing based on the position being inserted. If we're
-				// inserting at the end of the right node then we bias rebalancing to
-				// fill up the left node.
-				int to_move = (left->max_count() - left->count()) /
-						(1 + (insert_position < left->max_count()));
-				to_move = std::max(1, to_move);
-
-				if (((insert_position - to_move) >= 0) ||
-						((left->count() + to_move) < left->max_count())) {
-					left->rebalance_right_to_left(node, to_move);
-
-					assert(node->max_count() - node->count() == to_move);
-					insert_position = insert_position - to_move;
-					if (insert_position < 0) {
-						insert_position = insert_position + left->count() + 1;
-						node = left;
-					}
-
-					assert(node->count() < node->max_count());
-					return;
-				}
-			}
-		}
-
-		if (node->position() < parent->count()) {
-			// Try rebalancing with our right sibling.
-			node_type* right = parent->child(node->position() + 1);
-			if (right->count() < right->max_count()) {
-				// We bias rebalancing based on the position being inserted. If we're
-				// inserting at the beginning of the left node then we bias rebalancing
-				// to fill up the right node.
-				int to_move = (right->max_count() - right->count()) /
-						(1 + (insert_position > 0));
-				to_move = std::max(1, to_move);
-
-				if ((insert_position <= (node->count() - to_move)) ||
-						((right->count() + to_move) < right->max_count())) {
-					node->rebalance_left_to_right(right, to_move);
-
-					if (insert_position > node->count()) {
-						insert_position = insert_position - node->count() - 1;
-						node = right;
-					}
-
-					assert(node->count() < node->max_count());
-					return;
-				}
-			}
-		}
-
-		// Rebalancing failed, make sure there is room on the parent node for a new
-		// value.
-		if (parent->count() == parent->max_count()) {
-			iterator parent_iter(node->get_parent(), node->position());
-			rebalance_or_split(parent_iter);
-		}
-	} else {
-		// Rebalancing not possible because this is the root node.
-		if (root()->is_leaf()) {
-			// The root node is currently a leaf node: create a new root node and set
-			// the current root node as the child of the new root.
-			parent = new_internal_root_node();
-			parent->set_child(0, root());
-			__root() = parent;
-			assert(__rightmost() == parent->child(0));
-		} else {
-			// The root node is an internal node. We do not want to create a new root
-			// node because the root node is special and holds the size of the tree
-			// and a pointer to the rightmost node. So we create a new internal node
-			// and move all of the items on the current root into the new node.
-			parent = new_internal_node(parent);
-			parent->set_child(0, parent);
-			parent->swap(root());
-			node = parent;
-		}
-	}
-
-	// Split the node.
-	node_type* split_node;
-	if (node->is_leaf()) {
-		split_node = new_leaf_node(parent);
-		node->split(split_node, insert_position);
-		if (rightmost() == node) {
-			__rightmost() = split_node;
-		}
-	} else {
-		split_node = new_internal_node(parent);
-		node->split(split_node, insert_position);
-	}
-
-	if (insert_position > node->count()) {
-		insert_position = insert_position - node->count() - 1;
-		node = split_node;
-	}
-}
-
-template <typename P>
-void btree<P>::merge_nodes(node_type* left, node_type* right) {
-	left->merge(right);
-	if (right->is_leaf()) {
-		if (rightmost() == right) {
-			__rightmost() = left;
-		}
-		delete_leaf_node(right);
-	} else {
-		delete_internal_node(right);
-	}
-}
-
-template <typename P>
-bool btree<P>::try_merge_or_rebalance(const_iterator& iter) {
-	node_type* parent = iter.node->get_parent();
-	if (iter.node->position() > 0) {
-		// Try merging with our left sibling.
-		node_type* left = parent->child(iter.node->position() - 1);
-		if ((1 + left->count() + iter.node->count()) <= left->max_count()) {
-			iter.position += 1 + left->count();
-			merge_nodes(left, iter.node);
-			iter.node = left;
-			return true;
-		}
-	}
-	if (iter.node->position() < parent->count()) {
-		// Try merging with our right sibling.
-		node_type* right = parent->child(iter.node->position() + 1);
-		if ((1 + iter.node->count() + right->count()) <= right->max_count()) {
-			merge_nodes(iter.node, right);
-			return true;
-		}
-		// Try rebalancing with our right sibling. We don't perform rebalancing if
-		// we deleted the first element from iter.node and the node is not
-		// empty. This is a small optimization for the common pattern of deleting
-		// from the front of the tree.
-		if ((right->count() > kMinNodeValues) && ((iter.node->count() == 0) || (iter.position > 0))) {
-			int to_move = (right->count() - iter.node->count()) / 2;
-			to_move = std::min(to_move, right->count() - 1);
-			iter.node->rebalance_right_to_left(right, to_move);
-			return false;
-		}
-	}
-	if (iter.node->position() > 0) {
-		// Try rebalancing with our left sibling. We don't perform rebalancing if
-		// we deleted the last element from iter.node and the node is not
-		// empty. This is a small optimization for the common pattern of deleting
-		// from the back of the tree.
-		node_type* left = parent->child(iter.node->position() - 1);
-		if ((left->count() > kMinNodeValues) && ((iter.node->count() == 0) || (iter.position < iter.node->count()))) {
-			int to_move = (left->count() - iter.node->count()) / 2;
-			to_move = std::min(to_move, left->count() - 1);
-			left->rebalance_left_to_right(iter.node, to_move);
-			iter.position += to_move;
-			return false;
-		}
-	}
-	return false;
-}
-
-template <typename P>
-void btree<P>::try_shrink() {
-	if (root()->count() > 0) {
-		return;
-	}
-	// Deleted the last item on the root node, shrink the height of the tree.
-	if (root()->is_leaf()) {
-		assert(size() == 0);
-		delete_leaf_node(root());
-		__root() = nullptr;
-	} else {
-		node_type* child = root()->child(0);
-		if (child->is_leaf()) {
-			// The child is a leaf node so simply make it the root node in the tree.
-			child->make_root();
-			delete_internal_root_node();
-			__root() = child;
-		} else {
-			// The child is an internal node. We want to keep the existing root node
-			// so we move all of the values from the child node into the existing
-			// (empty) root node.
-			child->swap(root());
-			delete_internal_node(child);
-		}
-	}
-}
-
 template <typename P> template <typename IterType>
 inline IterType btree<P>::internal_last(IterType iter) {
 	while (iter.node && iter.position == iter.node->count()) {
@@ -2675,24 +2080,20 @@ btree<P>::internal_emplace(const_iterator hint, Args&&... args) {
 		--iter;
 		++iter.position;
 	}
-	if (iter.node->count() == iter.node->max_count()) {
-		// Make room in the leaf for the new item.
-		if (iter.node->max_count() < kNodeValues) {
-			// Insertion into the root where the root is smaller that the full node
-			// size. Simply grow the size of the root node.
-			assert(iter.node == root());
-			iter.node = new_leaf_root_node(std::min<int>(kNodeValues, 2 * iter.node->max_count()));
-			iter.node->swap(root());
-			delete_leaf_node(root());
-			__root() = iter.node;
-		} else {
-			rebalance_or_split(iter);
-			++__size();
-		}
-	} else if (!root()->is_leaf()) {
-		++__size();
+	if (iter.position != iter.node->count() || iter.node->count() == iter.node->max_count()) {
+		mutation_transaction transaction(*this, std::in_place, std::forward<Args>(args)...);
+		return transaction.insert(iter);
 	}
-	iter.node->insert_value(iter.position, std::forward<Args>(args)...);
+	try {
+		iter.node->insert_value(iter.position, std::forward<Args>(args)...);
+	} catch (...) {
+		if (root()->is_leaf() && root()->count() == 0) {
+			delete_leaf_node(root());
+			__root() = nullptr;
+		}
+		throw;
+	}
+	if (!root()->is_leaf()) ++__size();
 	return iter;
 }
 
@@ -2793,20 +2194,9 @@ IterType btree<P>::internal_find_multi(const key_type& key, IterType iter) const
 
 template <typename P>
 void btree<P>::internal_clear(node_type* node) {
-	if (!node->is_leaf()) {
-		for (int i = 0; i <= node->count(); ++i) {
-			internal_clear(node->child(i));
-		}
-		if (node == root()) {
-			delete_internal_root_node();
-		} else {
-			delete_internal_node(node);
-		}
-	} else {
-		delete_leaf_node(node);
-	}
+	detail::drain_state<node_type> state(node, node == root() && !node->is_leaf());
+	while (!state.done()) state.step(__internal_allocator(), std::numeric_limits<std::size_t>::max());
 }
-
 template <typename P>
 void btree<P>::internal_dump(std::ostream& os, const node_type* node, int level) const {
 	for (int i = 0; i < node->count(); ++i) {
@@ -2872,6 +2262,8 @@ public:
 	typedef typename Tree::const_iterator const_iterator;
 	typedef typename Tree::reverse_iterator reverse_iterator;
 	typedef typename Tree::const_reverse_iterator const_reverse_iterator;
+	using drain_type = typename Tree::drain_type;
+	drain_type drain() noexcept(noexcept(__tree.drain())) { return __tree.drain(); }
 
 public:
 	// Default constructor.
@@ -2883,6 +2275,10 @@ public:
 	btree_container(const self_type& x)
 		: __tree(x.__tree) {
 	}
+
+	btree_container(self_type&&) = default;
+	self_type& operator=(const self_type&) = default;
+	self_type& operator=(self_type&&) = default;
 
 	// Iterator routines.
 	iterator begin() {
@@ -3050,6 +2446,10 @@ public:
 		: super_type(x) {
 	}
 
+	btree_unique_container(self_type&&) = default;
+	self_type& operator=(const self_type&) = default;
+	self_type& operator=(self_type&&) = default;
+
 	// Range constructor.
 	template <class InputIterator>
 	btree_unique_container(InputIterator b, InputIterator e,
@@ -3111,7 +2511,7 @@ public:
 		return this->__tree.insert_unique(hint, x);
 	}
 	template <typename P>
-	std::pair<iterator, bool> insert(const_iterator hint, P&& x) {
+	iterator insert(const_iterator hint, P&& x) {
 		return this->__tree.insert_unique(hint, std::forward<P>(x));
 	}
 	iterator insert(const_iterator hint, value_type&& x) {
@@ -3122,8 +2522,8 @@ public:
 	}
 	template <typename InputIterator>
 	void insert(InputIterator f, InputIterator l) {
-		for (const_iterator end = this->cend(); f != l; ++f) {
-			insert(end, *f);
+		for (; f != l; ++f) {
+			insert(this->cend(), *f);
 		}
 	}
 
@@ -3179,6 +2579,10 @@ class btree_multi_container : public btree_container<Tree> {
 		: super_type(x) {
 	}
 
+	btree_multi_container(self_type&&) = default;
+	self_type& operator=(const self_type&) = default;
+	self_type& operator=(self_type&&) = default;
+
 	// Range constructor.
 	template <class InputIterator>
 	btree_multi_container(InputIterator b, InputIterator e,
@@ -3227,8 +2631,8 @@ class btree_multi_container : public btree_container<Tree> {
 	}
 	template <typename InputIterator>
 	void insert(InputIterator f, InputIterator l) {
-		for (const_iterator end = this->cend(); f != l; ++f) {
-			insert(end, *f);
+		for (; f != l; ++f) {
+			insert(this->cend(), *f);
 		}
 	}
 	void insert(std::initializer_list<value_type> il) {
@@ -3236,7 +2640,7 @@ class btree_multi_container : public btree_container<Tree> {
 	}
 
 	template <typename... Args>
-	std::pair<iterator, bool> emplace(Args&&... args) {
+	iterator emplace(Args&&... args) {
 		return this->__tree.emplace_multi(std::forward<Args>(args)...);
 	}
 

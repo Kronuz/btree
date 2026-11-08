@@ -46,7 +46,12 @@ class set : public btree_unique_container<
 
  public:
 	// Default constructor.
-	set(const key_compare& comp = key_compare(),
+	template <typename C = key_compare, typename A = allocator_type,
+		std::enable_if_t<std::is_default_constructible<C>::value &&
+			std::is_default_constructible<A>::value, int> = 0>
+	set() : set(key_compare(), allocator_type()) {}
+
+	set(const key_compare& comp,
 		const allocator_type& alloc = allocator_type())
 		: super_type(comp, alloc) {
 	}
@@ -55,6 +60,10 @@ class set : public btree_unique_container<
 	set(const self_type& x)
 		: super_type(x) {
 	}
+
+	set(self_type&&) = default;
+	self_type& operator=(const self_type&) = default;
+	self_type& operator=(self_type&&) = default;
 
 	// Range constructor.
 	template <class InputIterator>
@@ -123,8 +132,13 @@ class multiset : public btree_multi_container<
 
  public:
 	// Default constructor.
-	multiset(const key_compare& comp = key_compare(),
-			 const allocator_type& alloc = allocator_type())
+	template <typename C = key_compare, typename A = allocator_type,
+		std::enable_if_t<std::is_default_constructible<C>::value &&
+			std::is_default_constructible<A>::value, int> = 0>
+	multiset() : multiset(key_compare(), allocator_type()) {}
+
+	multiset(const key_compare& comp,
+		const allocator_type& alloc = allocator_type())
 		: super_type(comp, alloc) {
 	}
 
@@ -132,6 +146,10 @@ class multiset : public btree_multi_container<
 	multiset(const self_type& x)
 		: super_type(x) {
 	}
+
+	multiset(self_type&&) = default;
+	self_type& operator=(const self_type&) = default;
+	self_type& operator=(self_type&&) = default;
 
 	// Range constructor.
 	template <class InputIterator>
