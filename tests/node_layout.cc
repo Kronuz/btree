@@ -23,6 +23,7 @@ struct Allocations {
 	std::vector<std::size_t> requests;
 	std::size_t bytes = 0;
 	bool fail = false;
+	int remaining = -1;
 };
 template <class T> struct CountingAllocator {
 	using value_type = T;
@@ -30,7 +31,8 @@ template <class T> struct CountingAllocator {
 	explicit CountingAllocator(std::shared_ptr<Allocations> value) : state(std::move(value)) {}
 	template <class U> CountingAllocator(const CountingAllocator<U>& other) : state(other.state) {}
 	T* allocate(std::size_t count) {
-		if (state->fail) throw std::bad_alloc();
+		if (state->fail || state->remaining == 0) throw std::bad_alloc();
+		if (state->remaining > 0) --state->remaining;
 		auto pointer = std::allocator<T>{}.allocate(count);
 		try {
 			require(state->live.emplace(pointer, Allocations::Extent{count * sizeof(T), alignof(T)}).second);
@@ -162,6 +164,370 @@ void allocation_failure() {
 	require(rejected && values.size() == 1 && *values.begin() == 1 && state->bytes == before);
 	values.verify(); allocated_size(values, *state);
 }
+struct ThrowingValue {
+	inline static std::set<const ThrowingValue*> live;
+	inline static int remaining = -1;
+	int value;
+	char padding[32]{};
+	explicit ThrowingValue(int number) : value(number) { require(live.insert(this).second); }
+	ThrowingValue(const ThrowingValue& other) : value(other.value) {
+		if (remaining == 0) throw std::runtime_error("positioned value copy");
+		if (remaining > 0) --remaining;
+		require(live.insert(this).second);
+	}
+	ThrowingValue(ThrowingValue&& other) : ThrowingValue(static_cast<const ThrowingValue&>(other)) {}
+	ThrowingValue& operator=(const ThrowingValue& other) { value = other.value; return *this; }
+	ThrowingValue& operator=(ThrowingValue&& other) { value = other.value; return *this; }
+	~ThrowingValue() { require(live.erase(this) == 1); }
+};
+using ThrowingMap = btree::map<int, ThrowingValue, std::less<int>,
+	CountingAllocator<std::pair<const int, ThrowingValue>>>;
+void check_contents(const ThrowingMap& values, int size) {
+	require(values.size() == static_cast<std::size_t>(size));
+	int key = 0;
+	for (const auto& entry : values) {
+		require(entry.first == key && entry.second.value == key);
+		++key;
+	}
+	require(key == size);
+	values.verify();
+}
+void copy_failure_positions() {
+	for (int size : {0, 1, 3, 40, 300}) {
+		auto state = std::make_shared<Allocations>();
+		{
+			ThrowingMap source(std::less<int>{}, CountingAllocator<std::pair<const int, ThrowingValue>>{state});
+			for (int key = 0; key < size; ++key) source.emplace(key, key);
+			const auto objects = ThrowingValue::live;
+			const auto bytes = state->bytes;
+			const auto nodes = state->live.size();
+			for (int position = 0; position <= size; ++position) {
+				ThrowingValue::remaining = position;
+				bool rejected = false;
+				try {
+					ThrowingMap copied(source);
+					check_contents(copied, size);
+					require(copied.bytes_used() == sizeof(ThrowingMap) + bytes);
+				} catch (const std::runtime_error& error) {
+					if (std::string_view(error.what()) != "positioned value copy") throw;
+					rejected = true;
+				}
+				ThrowingValue::remaining = -1;
+				require(rejected == (position < size));
+				require(ThrowingValue::live == objects && state->bytes == bytes && state->live.size() == nodes);
+				check_contents(source, size);
+			}
+			for (std::size_t position = 0; position <= nodes; ++position) {
+				state->remaining = static_cast<int>(position);
+				bool rejected = false;
+				try { ThrowingMap copied(source); check_contents(copied, size); }
+				catch (const std::bad_alloc&) { rejected = true; }
+				state->remaining = -1;
+				require(rejected == (position < nodes));
+				require(ThrowingValue::live == objects && state->bytes == bytes && state->live.size() == nodes);
+				check_contents(source, size);
+			}
+		}
+		require(ThrowingValue::live.empty() && state->live.empty() && state->bytes == 0);
+	}
+}
+void assignment_failure_positions() {
+	for (int size : {1, 40, 300}) {
+		auto source_state = std::make_shared<Allocations>();
+		auto target_state = std::make_shared<Allocations>();
+		{
+			ThrowingMap source(std::less<int>{}, CountingAllocator<std::pair<const int, ThrowingValue>>{source_state});
+			for (int key = 0; key < size; ++key) source.emplace(key, key);
+			const auto objects = ThrowingValue::live;
+			const auto bytes = source_state->bytes;
+			for (int position = 0; position <= size; ++position) {
+				{
+					ThrowingMap target(std::less<int>{}, CountingAllocator<std::pair<const int, ThrowingValue>>{target_state});
+					target.emplace(-1, -1);
+					ThrowingValue::remaining = position;
+					bool rejected = false;
+					try { target = source; }
+					catch (const std::runtime_error& error) {
+						if (std::string_view(error.what()) != "positioned value copy") throw;
+						rejected = true;
+					}
+					ThrowingValue::remaining = -1;
+					require(rejected == (position < size));
+					check_contents(target, rejected ? 0 : size);
+					require(target_state->live.empty() && target_state->bytes == 0);
+					if (rejected) require(ThrowingValue::live == objects && source_state->bytes == bytes);
+				}
+				require(ThrowingValue::live == objects && source_state->bytes == bytes);
+				check_contents(source, size);
+			}
+		}
+		require(ThrowingValue::live.empty() && source_state->live.empty() && target_state->live.empty());
+	}
+}
+void nested_copy_failure_positions() {
+	using Entry = std::pair<const int, ThrowingMap>;
+	using Nested = btree::map<int, ThrowingMap, std::less<int>, CountingAllocator<Entry>>;
+	auto state = std::make_shared<Allocations>();
+	{
+		Nested source(std::less<int>{}, CountingAllocator<Entry>{state});
+		for (int group = 0; group < 4; ++group) {
+			ThrowingMap inner(std::less<int>{}, CountingAllocator<std::pair<const int, ThrowingValue>>{state});
+			for (int key = 0; key < 40; ++key) inner.emplace(key, key);
+			source.emplace(group, inner);
+		}
+		const auto objects = ThrowingValue::live;
+		const auto bytes = state->bytes;
+		const auto nodes = state->live.size();
+		for (int position = 0; position <= 160; ++position) {
+			ThrowingValue::remaining = position;
+			bool rejected = false;
+			try {
+				Nested copied(source);
+				require(copied.size() == 4);
+				copied.verify();
+				for (const auto& entry : copied) check_contents(entry.second, 40);
+			} catch (const std::runtime_error& error) {
+				if (std::string_view(error.what()) != "positioned value copy") throw;
+				rejected = true;
+			}
+			ThrowingValue::remaining = -1;
+			require(rejected == (position < 160));
+			require(ThrowingValue::live == objects && state->bytes == bytes && state->live.size() == nodes);
+			source.verify();
+			for (const auto& entry : source) check_contents(entry.second, 40);
+		}
+	}
+	require(ThrowingValue::live.empty() && state->live.empty() && state->bytes == 0);
+}
+void tail_copy_failure() {
+	auto state = std::make_shared<Allocations>();
+	{
+		ThrowingMap values(std::less<int>{}, CountingAllocator<std::pair<const int, ThrowingValue>>{state});
+		for (int key = 0; key < 41; ++key) values.try_emplace(key, key);
+		int size = 41;
+		for (;;) {
+			const auto allocations = state->requests.size();
+			values.try_emplace(size, size);
+			++size;
+			if (state->requests.size() != allocations) break;
+		}
+		ThrowingValue incoming(size);
+		const auto objects = ThrowingValue::live;
+		const auto bytes = state->bytes;
+		ThrowingValue::remaining = 0;
+		bool rejected = false;
+		try { values.try_emplace(size, incoming); }
+		catch (const std::runtime_error& error) {
+			if (std::string_view(error.what()) != "positioned value copy") throw;
+			rejected = true;
+		}
+		ThrowingValue::remaining = -1;
+		require(rejected && state->bytes == bytes && ThrowingValue::live == objects);
+		check_contents(values, size);
+		values.try_emplace(size, incoming);
+		check_contents(values, size + 1);
+	}
+	require(ThrowingValue::live.empty() && state->live.empty() && state->bytes == 0);
+}
+template <class Tree> void move_family() {
+	static_assert(std::is_nothrow_move_constructible<Tree>::value);
+	static_assert(std::is_nothrow_move_assignable<Tree>::value);
+	static_assert(std::is_copy_constructible<Tree>::value && std::is_copy_assignable<Tree>::value);
+	Tree source;
+	for (int key = 0; key < 64; ++key) {
+		if constexpr (std::is_same<typename Tree::value_type, typename Tree::key_type>::value) source.emplace(key);
+		else source.emplace(key, key);
+	}
+	Tree moved(std::move(source));
+	require(source.empty() && moved.size() == 64);
+	Tree assigned;
+	assigned = std::move(moved);
+	require(moved.empty() && assigned.size() == 64);
+	auto* same = &assigned;
+	assigned = std::move(*same);
+	require(assigned.size() == 64);
+	Tree copied(assigned);
+	copied = assigned;
+	require(copied.size() == 64);
+	if constexpr (std::is_same<typename Tree::value_type, typename Tree::key_type>::value) source.emplace(72);
+	else source.emplace(72, 72);
+	require(source.size() == 1 && source.count(72) == 1);
+	if constexpr (std::is_same<typename Tree::value_type, typename Tree::key_type>::value) {
+		auto inserted = source.insert(source.end(), 73L);
+		require(*inserted == 73);
+	} else {
+		auto inserted = source.insert(source.end(), std::make_pair(73, 73));
+		require(inserted->first == 73 && inserted->second == 73);
+	}
+	require(source.size() == 2);
+	source.verify(); assigned.verify(); copied.verify();
+}
+struct NonDefaultCompare {
+	NonDefaultCompare() = delete;
+	explicit NonDefaultCompare(int) {}
+	bool operator()(int left, int right) const { return left < right; }
+};
+void explicit_comparator_construction() {
+	using Tree = btree::map<int, int, NonDefaultCompare>;
+	static_assert(!std::is_default_constructible<Tree>::value);
+	Tree values(NonDefaultCompare(1));
+	values.emplace(1, 1);
+	require(values.at(1) == 1);
+	values.verify();
+}
+void move_ownership() {
+	static_assert(!std::is_default_constructible<ThrowingMap>::value);
+	static_assert(std::is_constructible<ThrowingMap, std::less<int>,
+		CountingAllocator<std::pair<const int, ThrowingValue>>>::value);
+	move_family<btree::map<int, int>>();
+	move_family<btree::multimap<int, int>>();
+	move_family<btree::set<int>>();
+	move_family<btree::multiset<int>>();
+	auto source_state = std::make_shared<Allocations>();
+	auto target_state = std::make_shared<Allocations>();
+	{
+		ThrowingMap source(std::less<int>{}, CountingAllocator<std::pair<const int, ThrowingValue>>{source_state});
+		for (int key = 0; key < 64; ++key) source.try_emplace(key, key);
+		const auto objects = ThrowingValue::live;
+		const auto requests = source_state->requests.size();
+		const auto bytes = source_state->bytes;
+		ThrowingValue::remaining = 0;
+		source_state->fail = true;
+		ThrowingMap moved(std::move(source));
+		require(source.empty() && ThrowingValue::live == objects);
+		check_contents(moved, 64);
+		source_state->fail = false;
+		ThrowingMap target(std::less<int>{}, CountingAllocator<std::pair<const int, ThrowingValue>>{target_state});
+		target.try_emplace(-1, -1);
+		source_state->fail = target_state->fail = true;
+		target = std::move(moved);
+		require(moved.empty() && target_state->live.empty() && target_state->bytes == 0);
+		require(source_state->bytes == bytes && source_state->requests.size() == requests);
+		require(ThrowingValue::live == objects);
+		check_contents(target, 64);
+		auto* same = &target;
+		target = std::move(*same);
+		check_contents(target, 64);
+		source_state->fail = target_state->fail = false;
+		ThrowingValue::remaining = -1;
+		source.try_emplace(0, 0);
+		moved.try_emplace(0, 0);
+		check_contents(source, 1); check_contents(moved, 1);
+	}
+	require(ThrowingValue::live.empty() && source_state->live.empty() && target_state->live.empty());
+}
+struct ThrowingCompare {
+	inline static bool reject_copy = false, reject_assignment = false;
+	ThrowingCompare() = default;
+	ThrowingCompare(const ThrowingCompare&) {
+		if (reject_copy) throw std::runtime_error("comparator copy");
+	}
+	ThrowingCompare& operator=(const ThrowingCompare&) {
+		if (reject_assignment) throw std::runtime_error("comparator assignment");
+		return *this;
+	}
+	bool operator()(int left, int right) const { return left < right; }
+};
+void move_preparation_failure() {
+	using Tree = btree::map<int, int, ThrowingCompare>;
+	static_assert(!std::is_nothrow_move_constructible<Tree>::value);
+	static_assert(!std::is_nothrow_move_assignable<Tree>::value);
+	Tree source;
+	source.emplace(1, 1);
+	ThrowingCompare::reject_copy = true;
+	bool rejected = false;
+	try { Tree moved(std::move(source)); }
+	catch (const std::runtime_error&) { rejected = true; }
+	ThrowingCompare::reject_copy = false;
+	require(rejected && source.size() == 1 && source.at(1) == 1);
+	Tree target;
+	target.emplace(2, 2);
+	ThrowingCompare::reject_assignment = true;
+	rejected = false;
+	try { target = std::move(source); }
+	catch (const std::runtime_error&) { rejected = true; }
+	ThrowingCompare::reject_assignment = false;
+	require(rejected && target.empty() && source.size() == 1 && source.at(1) == 1);
+	target.emplace(3, 3);
+	source.verify(); target.verify();
+}
+void split_allocation_failure() {
+	using Params = btree::btree_map_params<int, ThrowingValue, std::less<int>,
+		CountingAllocator<std::pair<const int, ThrowingValue>>, 256>;
+	constexpr int capacity = btree::btree_node<Params>::kNodeValues;
+	auto state = std::make_shared<Allocations>();
+	{
+		ThrowingMap values(std::less<int>{}, CountingAllocator<std::pair<const int, ThrowingValue>>{state});
+		for (int key = 0; key < capacity; ++key) values.try_emplace(key, key);
+		state->remaining = 1;
+		bool rejected = false;
+		try { values.try_emplace(capacity, capacity); }
+		catch (const std::bad_alloc&) { rejected = true; }
+		state->remaining = -1;
+		std::cout << "split allocation: rejected=" << rejected << " height=" << values.height() << '\n';
+		require(rejected && values.height() == 1);
+		check_contents(values, capacity);
+		allocated_size(values, *state);
+	}
+	require(ThrowingValue::live.empty() && state->live.empty() && state->bytes == 0);
+}
+void split_separator_failure() {
+	using Params = btree::btree_map_params<int, ThrowingValue, std::less<int>,
+		CountingAllocator<std::pair<const int, ThrowingValue>>, 256>;
+	constexpr int capacity = btree::btree_node<Params>::kNodeValues;
+	auto state = std::make_shared<Allocations>();
+	{
+		ThrowingMap values(std::less<int>{}, CountingAllocator<std::pair<const int, ThrowingValue>>{state});
+		for (int key = 0; key < capacity; ++key) values.try_emplace(key, key);
+		ThrowingValue::remaining = 0;
+		bool rejected = false;
+		try { values.try_emplace(capacity, capacity); }
+		catch (const std::runtime_error& error) {
+			if (std::string_view(error.what()) != "positioned value copy") throw;
+			rejected = true;
+		}
+		ThrowingValue::remaining = -1;
+		std::size_t visited = 0;
+		for (const auto& entry : values) {
+			require(entry.first == static_cast<int>(visited));
+			++visited;
+		}
+		const auto accounted = values.bytes_used() - sizeof(ThrowingMap);
+		std::cout << "split separator: rejected=" << rejected << " expected=" << capacity
+			<< " visited=" << visited << " allocated=" << state->bytes << " accounted=" << accounted << '\n';
+		require(rejected && visited == static_cast<std::size_t>(capacity) && accounted == state->bytes);
+		check_contents(values, capacity);
+	}
+	require(ThrowingValue::live.empty() && state->live.empty() && state->bytes == 0);
+}
+void compact_root_copy_failure() {
+	for (int size : {0, 1, 2, 4}) {
+		for (int position = 0; position < size + 1; ++position) {
+			auto state = std::make_shared<Allocations>();
+			{
+				ThrowingMap values(std::less<int>{}, CountingAllocator<std::pair<const int, ThrowingValue>>{state});
+				for (int key = 0; key < size; ++key) values.emplace(key, key);
+				const auto objects = ThrowingValue::live;
+				ThrowingValue incoming(size);
+				ThrowingValue::remaining = position;
+				bool rejected = false;
+				try { values.emplace(size, incoming); }
+				catch (const std::runtime_error& error) {
+					if (std::string_view(error.what()) != "positioned value copy") throw;
+					rejected = true;
+				}
+				ThrowingValue::remaining = -1;
+				require(rejected);
+				check_contents(values, size);
+				require(ThrowingValue::live.size() == objects.size() + 1);
+				allocated_size(values, *state);
+				values.emplace(size, incoming);
+				check_contents(values, size + 1);
+			}
+			require(ThrowingValue::live.empty() && state->live.empty() && state->bytes == 0);
+		}
+	}
+}
 template <class T> struct MisalignedAllocator {
 	using value_type = T;
 	std::shared_ptr<unsigned> live;
@@ -209,12 +575,20 @@ void ordered_model() {
 }
 int main(int argc, char** argv) {
 	try {
-		if (argc == 2 && std::string_view(argv[1]) == "--short-root-only") {
+		if (argc == 2 && std::string_view(argv[1]) == "--split-allocation-only") {
+			split_allocation_failure();
+		} else if (argc == 2 && std::string_view(argv[1]) == "--tail-copy-only") {
+			tail_copy_failure();
+		} else if (argc == 2 && std::string_view(argv[1]) == "--split-separator-only") {
+			split_separator_failure();
+		} else if (argc == 2 && std::string_view(argv[1]) == "--short-root-only") {
 			short_root_lifetime();
 		} else {
 			require(argc == 1);
 			short_root_lifetime(); compact_roots(); unpadded_leaf_extents(); move_only_values();
 			aligned_slots(); allocation_failure(); rejected_alignment(); ordered_model();
+			move_ownership(); move_preparation_failure(); explicit_comparator_construction();
+			copy_failure_positions(); assignment_failure_positions(); nested_copy_failure_positions(); compact_root_copy_failure(); tail_copy_failure(); split_allocation_failure();
 		}
 	}
 	catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

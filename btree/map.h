@@ -57,6 +57,10 @@ public:
 			: super_type(x) {
 	}
 
+	btree_map_container(self_type&&) = default;
+	self_type& operator=(const self_type&) = default;
+	self_type& operator=(self_type&&) = default;
+
 	// Range constructor.
 	template <class InputIterator>
 	btree_map_container(InputIterator b, InputIterator e,
@@ -142,7 +146,12 @@ public:
 
 public:
 	// Default constructor.
-	map(const key_compare& comp = key_compare(),
+	template <typename C = key_compare, typename A = allocator_type,
+		std::enable_if_t<std::is_default_constructible<C>::value &&
+			std::is_default_constructible<A>::value, int> = 0>
+	map() : map(key_compare(), allocator_type()) {}
+
+	map(const key_compare& comp,
 		const allocator_type& alloc = allocator_type())
 		: super_type(comp, alloc) {
 	}
@@ -151,6 +160,10 @@ public:
 	map(const self_type& x)
 		: super_type(x) {
 	}
+
+	map(self_type&&) = default;
+	self_type& operator=(const self_type&) = default;
+	self_type& operator=(self_type&&) = default;
 
 	// Range constructor.
 	template <class InputIterator>
@@ -221,8 +234,13 @@ class multimap : public btree_multi_container<
 
  public:
 	// Default constructor.
-	multimap(const key_compare& comp = key_compare(),
-			 const allocator_type& alloc = allocator_type())
+	template <typename C = key_compare, typename A = allocator_type,
+		std::enable_if_t<std::is_default_constructible<C>::value &&
+			std::is_default_constructible<A>::value, int> = 0>
+	multimap() : multimap(key_compare(), allocator_type()) {}
+
+	multimap(const key_compare& comp,
+		const allocator_type& alloc = allocator_type())
 		: super_type(comp, alloc) {
 	}
 
@@ -230,6 +248,10 @@ class multimap : public btree_multi_container<
 	multimap(const self_type& x)
 		: super_type(x) {
 	}
+
+	multimap(self_type&&) = default;
+	self_type& operator=(const self_type&) = default;
+	self_type& operator=(self_type&&) = default;
 
 	// Range constructor.
 	template <class InputIterator>
