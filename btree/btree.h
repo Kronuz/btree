@@ -124,6 +124,7 @@
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace btree {
 
@@ -213,18 +214,16 @@ struct btree_is_transparent<Compare, std::void_t<typename Compare::is_transparen
 // with common comparison functors.
 template <typename Compare>
 struct btree_key_compare_to_adapter : Compare {
-	btree_key_compare_to_adapter() { }
-	btree_key_compare_to_adapter(const Compare& c) : Compare(c) { }
-	btree_key_compare_to_adapter(const btree_key_compare_to_adapter<Compare>& c)
-		: Compare(c) {
-	}
+	btree_key_compare_to_adapter() = default;
+	btree_key_compare_to_adapter(const Compare& c) noexcept(std::is_nothrow_copy_constructible<Compare>::value) : Compare(c) { }
+	btree_key_compare_to_adapter(const btree_key_compare_to_adapter<Compare>&) = default;
 };
 
 template <>
 struct btree_key_compare_to_adapter<std::less<std::string>> : public btree_key_compare_to_tag {
-	btree_key_compare_to_adapter() { }
-	btree_key_compare_to_adapter(const std::less<std::string>&) { }
-	btree_key_compare_to_adapter(const btree_key_compare_to_adapter<std::less<std::string>>&) { }
+	btree_key_compare_to_adapter() noexcept { }
+	btree_key_compare_to_adapter(const std::less<std::string>&) noexcept { }
+	btree_key_compare_to_adapter(const btree_key_compare_to_adapter<std::less<std::string>>&) noexcept { }
 	int operator()(const std::string& a, const std::string& b) const {
 		return a.compare(b);
 	}
@@ -232,9 +231,9 @@ struct btree_key_compare_to_adapter<std::less<std::string>> : public btree_key_c
 
 template <>
 struct btree_key_compare_to_adapter<std::greater<std::string>> : public btree_key_compare_to_tag {
-	btree_key_compare_to_adapter() { }
-	btree_key_compare_to_adapter(const std::greater<std::string>&) { }
-	btree_key_compare_to_adapter(const btree_key_compare_to_adapter<std::greater<std::string>>&) { }
+	btree_key_compare_to_adapter() noexcept { }
+	btree_key_compare_to_adapter(const std::greater<std::string>&) noexcept { }
+	btree_key_compare_to_adapter(const btree_key_compare_to_adapter<std::greater<std::string>>&) noexcept { }
 	int operator()(const std::string& a, const std::string& b) const {
 		return b.compare(a);
 	}
@@ -921,8 +920,11 @@ public:
 	}
 
 	static btree_node* init_root(void* storage, btree_node* parent) {
+		return init_root(storage, parent, parent->count());
+	}
+	static btree_node* init_root(void* storage, btree_node* parent, size_type size) {
 		btree_node* n = init_internal(storage, parent);
-		::new (static_cast<void*>(n->storage() + root_offset())) root_metadata{parent, parent->count()};
+		::new (static_cast<void*>(n->storage() + root_offset())) root_metadata{parent, size};
 		return n;
 	}
 
@@ -933,6 +935,7 @@ public:
 	}
 
 private:
+	template <typename> friend class btree;
 	btree_node(btree_node* parent, int capacity)
 		: fields_{true, 0, static_cast<typename base_fields::field_type>(capacity), 0, parent} {}
 	char* storage() { return reinterpret_cast<char*>(this); }
@@ -1213,6 +1216,8 @@ public:
 
 	// Copy constructor.
 	btree(const self_type& x);
+	btree(self_type&& x) noexcept(std::is_nothrow_copy_constructible<key_compare>::value &&
+		std::is_nothrow_copy_constructible<internal_allocator_type>::value);
 
 	// Destructor.
 	~btree() {
@@ -1336,7 +1341,7 @@ public:
 	iterator emplace_hint_unique_key_args(const_iterator hint, const key_type& key, Args&&... args);
 
 	template <typename P>
-	std::pair<iterator, bool> emplace_hint_unique(const_iterator hint, P&& x) {
+	iterator emplace_hint_unique(const_iterator hint, P&& x) {
 		return emplace_hint_unique_extract_key(hint, std::forward<P>(x), btree_can_extract_key<P, key_type>());
 	}
 
@@ -1538,6 +1543,17 @@ public:
 		return *this;
 	}
 
+	self_type& operator=(self_type&& x) noexcept(std::is_nothrow_copy_assignable<key_compare>::value &&
+		std::is_nothrow_copy_assignable<internal_allocator_type>::value) {
+		if (&x == this) return *this;
+		clear();
+		__key_comp() = x.key_comp();
+		__internal_allocator() = x.internal_allocator();
+		__root() = x.root();
+		x.__root() = nullptr;
+		return *this;
+	}
+
 	key_compare& __key_comp() {
 		return *this;
 	}
@@ -1734,6 +1750,76 @@ private:
 		deallocate_node(node, node_type::leaf_size(node->max_count()));
 	}
 
+	struct copy_level {
+		size_type nodes;
+		size_type next = 0;
+	};
+	using copy_level_allocator = typename internal_allocator_traits::template rebind_alloc<copy_level>;
+	using copy_plan = std::vector<copy_level, copy_level_allocator>;
+
+	node_type* build_ordered_copy(const_iterator& source, copy_plan& levels, std::size_t height,
+		size_type leaf_values, node_type* parent, bool root_node) {
+		const auto ordinal = levels[height].next++;
+		int count;
+		node_type* result;
+		if (height == 0) {
+			count = static_cast<int>(leaf_values / levels[0].nodes + (ordinal < leaf_values % levels[0].nodes));
+			int capacity = kNodeValues;
+			if (root_node) {
+				capacity = 1;
+				while (capacity < count) capacity = std::min<int>(kNodeValues, capacity * 2);
+			}
+			result = node_type::init_leaf(allocate_node(node_type::leaf_size(capacity)), parent, capacity);
+		} else {
+			const auto children = levels[height - 1].nodes;
+			count = static_cast<int>(children / levels[height].nodes +
+				(ordinal < children % levels[height].nodes)) - 1;
+			result = root_node ? node_type::init_root(allocate_node(node_type::root_size()), parent, 0)
+				: new_internal_node(parent);
+		}
+		int children = 0;
+		try {
+			for (int i = 0; i <= count; ++i) {
+				if (height != 0) {
+					result->set_child(i, build_ordered_copy(source, levels, height - 1, leaf_values, result, false));
+					++children;
+				}
+				if (i != count) {
+					result->construct_value(i, *source);
+					result->set_count(i + 1);
+					++source;
+				}
+			}
+		} catch (...) {
+			for (int i = 0; i < children; ++i) internal_clear(result->child(i));
+			if (result->is_leaf()) delete_leaf_node(result);
+			else deallocate_node(result, root_node ? node_type::root_size() : node_type::internal_size());
+			throw;
+		}
+		return result;
+	}
+
+	node_type* copy_root(const self_type& source) {
+		const auto size = source.size();
+		if (size == 0) return nullptr;
+		copy_plan levels{copy_level_allocator(internal_allocator())};
+		const auto leaves = size / (kNodeValues + 1) + 1;
+		levels.push_back({leaves});
+		while (levels.back().nodes > 1)
+			levels.push_back({1 + (levels.back().nodes - 1) / (kNodeValues + 1)});
+		auto iterator = source.begin();
+		auto result = build_ordered_copy(iterator, levels, levels.size() - 1, size - leaves + 1, nullptr, true);
+		auto first = result;
+		while (!first->is_leaf()) first = first->child(0);
+		result->fields_.parent = first;
+		if (!result->is_leaf()) {
+			auto last = result;
+			while (!last->is_leaf()) last = last->child(last->count());
+			result->__rightmost() = last;
+			result->__size() = size;
+		}
+		return result;
+	}
 	// Rebalances or splits the node iter points to.
 	void rebalance_or_split(iterator& iter);
 
@@ -2229,11 +2315,19 @@ btree<P>::btree(const self_type& x)
 	assign(x);
 }
 
+template <typename P>
+btree<P>::btree(self_type&& x) noexcept(std::is_nothrow_copy_constructible<key_compare>::value &&
+	std::is_nothrow_copy_constructible<internal_allocator_type>::value)
+	: key_compare(x.key_comp()), root_(x.internal_allocator(), x.root()) {
+	x.__root() = nullptr;
+}
+
 template <typename P> template <typename... Args>
 std::pair<typename btree<P>::iterator, bool>
 btree<P>::emplace_unique_key_args(const key_type& key, Args&&... args) {
-	if (empty()) {
+	if (root() == nullptr) {
 		__root() = new_leaf_root_node(1);
+		return std::make_pair(internal_emplace(iterator(root(), 0), std::forward<Args>(args)...), true);
 	}
 
 	std::pair<iterator, int> res = internal_locate(key, iterator(root(), 0));
@@ -2280,8 +2374,9 @@ btree<P>::emplace_hint_unique_key_args(const_iterator hint, const key_type& key,
 template <typename P> template <typename... Args>
 typename btree<P>::iterator
 btree<P>::emplace_multi_key_args(const key_type& key, Args&&... args) {
-	if (empty()) {
+	if (root() == nullptr) {
 		__root() = new_leaf_root_node(1);
+		return internal_emplace(iterator(root(), 0), std::forward<Args>(args)...);
 	}
 
 	iterator iter = internal_upper_bound(key, iterator(root(), 0));
@@ -2320,17 +2415,7 @@ void btree<P>::assign(const self_type& x) {
 	__key_comp() = x.key_comp();
 	__internal_allocator() = x.internal_allocator();
 
-	// Assignment can avoid key comparisons because we know the order of the
-	// values is the same order we'll store them in.
-	for (const_iterator iter = x.begin(); iter != x.end(); ++iter) {
-		if (empty()) {
-			emplace_multi(*iter);
-		} else {
-			// If the btree is not empty, we can just insert the new value at the end
-			// of the tree!
-			internal_emplace(end(), *iter);
-		}
-	}
+	__root() = copy_root(x);
 }
 
 template <typename P>
@@ -2461,6 +2546,7 @@ void btree<P>::rebalance_or_split(iterator& iter) {
 	node_type*& node = iter.node;
 	int& insert_position = iter.position;
 	assert(node->count() == node->max_count());
+	node_type* split_node = nullptr;
 
 	// First try to make room on the node by rebalancing.
 	node_type* parent = node->get_parent();
@@ -2531,6 +2617,12 @@ void btree<P>::rebalance_or_split(iterator& iter) {
 			// The root node is currently a leaf node: create a new root node and set
 			// the current root node as the child of the new root.
 			parent = new_internal_root_node();
+			try {
+				split_node = new_leaf_node(parent);
+			} catch (...) {
+				deallocate_node(parent, node_type::root_size());
+				throw;
+			}
 			parent->set_child(0, root());
 			__root() = parent;
 			assert(__rightmost() == parent->child(0));
@@ -2547,9 +2639,8 @@ void btree<P>::rebalance_or_split(iterator& iter) {
 	}
 
 	// Split the node.
-	node_type* split_node;
 	if (node->is_leaf()) {
-		split_node = new_leaf_node(parent);
+		if (!split_node) split_node = new_leaf_node(parent);
 		node->split(split_node, insert_position);
 		if (rightmost() == node) {
 			__rightmost() = split_node;
@@ -2681,18 +2772,32 @@ btree<P>::internal_emplace(const_iterator hint, Args&&... args) {
 			// Insertion into the root where the root is smaller that the full node
 			// size. Simply grow the size of the root node.
 			assert(iter.node == root());
-			iter.node = new_leaf_root_node(std::min<int>(kNodeValues, 2 * iter.node->max_count()));
-			iter.node->swap(root());
+			auto replacement = new_leaf_root_node(std::min<int>(kNodeValues, 2 * iter.node->max_count()));
+			try {
+				for (int i = 0; i < root()->count(); ++i) {
+					replacement->construct_value(i, std::move_if_noexcept(root()->value(i)));
+					replacement->set_count(i + 1);
+				}
+			} catch (...) {
+				delete_leaf_node(replacement);
+				throw;
+			}
 			delete_leaf_node(root());
-			__root() = iter.node;
+			__root() = iter.node = replacement;
 		} else {
 			rebalance_or_split(iter);
-			++__size();
 		}
-	} else if (!root()->is_leaf()) {
-		++__size();
 	}
-	iter.node->insert_value(iter.position, std::forward<Args>(args)...);
+	try {
+		iter.node->insert_value(iter.position, std::forward<Args>(args)...);
+	} catch (...) {
+		if (root()->is_leaf() && root()->count() == 0) {
+			delete_leaf_node(root());
+			__root() = nullptr;
+		}
+		throw;
+	}
+	if (!root()->is_leaf()) ++__size();
 	return iter;
 }
 
@@ -2884,6 +2989,10 @@ public:
 		: __tree(x.__tree) {
 	}
 
+	btree_container(self_type&&) = default;
+	self_type& operator=(const self_type&) = default;
+	self_type& operator=(self_type&&) = default;
+
 	// Iterator routines.
 	iterator begin() {
 		return __tree.begin();
@@ -3050,6 +3159,10 @@ public:
 		: super_type(x) {
 	}
 
+	btree_unique_container(self_type&&) = default;
+	self_type& operator=(const self_type&) = default;
+	self_type& operator=(self_type&&) = default;
+
 	// Range constructor.
 	template <class InputIterator>
 	btree_unique_container(InputIterator b, InputIterator e,
@@ -3111,7 +3224,7 @@ public:
 		return this->__tree.insert_unique(hint, x);
 	}
 	template <typename P>
-	std::pair<iterator, bool> insert(const_iterator hint, P&& x) {
+	iterator insert(const_iterator hint, P&& x) {
 		return this->__tree.insert_unique(hint, std::forward<P>(x));
 	}
 	iterator insert(const_iterator hint, value_type&& x) {
@@ -3122,8 +3235,8 @@ public:
 	}
 	template <typename InputIterator>
 	void insert(InputIterator f, InputIterator l) {
-		for (const_iterator end = this->cend(); f != l; ++f) {
-			insert(end, *f);
+		for (; f != l; ++f) {
+			insert(this->cend(), *f);
 		}
 	}
 
@@ -3179,6 +3292,10 @@ class btree_multi_container : public btree_container<Tree> {
 		: super_type(x) {
 	}
 
+	btree_multi_container(self_type&&) = default;
+	self_type& operator=(const self_type&) = default;
+	self_type& operator=(self_type&&) = default;
+
 	// Range constructor.
 	template <class InputIterator>
 	btree_multi_container(InputIterator b, InputIterator e,
@@ -3227,8 +3344,8 @@ class btree_multi_container : public btree_container<Tree> {
 	}
 	template <typename InputIterator>
 	void insert(InputIterator f, InputIterator l) {
-		for (const_iterator end = this->cend(); f != l; ++f) {
-			insert(end, *f);
+		for (; f != l; ++f) {
+			insert(this->cend(), *f);
 		}
 	}
 	void insert(std::initializer_list<value_type> il) {
@@ -3236,7 +3353,7 @@ class btree_multi_container : public btree_container<Tree> {
 	}
 
 	template <typename... Args>
-	std::pair<iterator, bool> emplace(Args&&... args) {
+	iterator emplace(Args&&... args) {
 		return this->__tree.emplace_multi(std::forward<Args>(args)...);
 	}
 
