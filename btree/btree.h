@@ -132,9 +132,6 @@
 #include "btree_node.h"
 #include "btree_iterator.h"
 #include "btree_tree.h"
-#include "btree_node_impl.h"
-#include "btree_tree_modify.h"
-#include "btree_tree_internal.h"
 #include "btree_container.h"
 
 #endif  // BTREE_BTREE_H__

@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * btree_node: the fixed-header node with trailing slots.
+ * btree_node: the fixed-header node with trailing slots, with its member definitions.
  * A real header, but the pieces are meant to be used through btree/btree.h.
  */
 
@@ -22,6 +22,7 @@
 #define BTREE_BTREE_NODE_H__
 
 #include <assert.h>
+#include <algorithm>
 #include <cstddef>
 #include <limits>
 #include <new>
@@ -600,6 +601,275 @@ private:
 	btree_node(const btree_node&);
 	void operator=(const btree_node&);
 };
+
+////
+// btree_node methods
+template <typename P> template <typename... Args>
+inline void btree_node<P>::insert_value(int i, Args&&... args) {
+	auto cnt = count();
+
+	assert(i <= cnt);
+
+	// Initialize new value at the end.
+	construct_value(cnt, std::forward<Args>(args)...);
+
+	// Move initialized value to the correct position.
+	if (cnt > i) {
+		if (is_leaf()) {
+			for (int j = cnt; j > i; --j) {
+				swap_value(j - 1, j);
+			}
+		} else {
+			for (int j = cnt; j > i; --j) {
+				swap_value(j - 1, j);
+				move_child(j, j + 1);
+			}
+		}
+	}
+
+	// Increase number of items
+	set_count(cnt + 1);
+}
+
+template <typename P>
+inline void btree_node<P>::remove_value(int i) {
+	auto cnt = count();
+
+	// Move the value to the end.
+	if (is_leaf()) {
+		for (int j = i + 1; j < cnt; ++j) {
+			swap_value(j, j - 1);
+		}
+	} else {
+		assert(child(i + 1)->count() == 0);
+		for (int j = i + 1; j < cnt; ++j) {
+			swap_value(j, j - 1);
+			move_child(j + 1, j);
+		}
+		reset_child(cnt);
+	}
+
+	// Decrease number of items.
+	set_count(--cnt);
+
+	// Finally, destroy value.
+	destroy_value(cnt);
+}
+
+template <typename P>
+void btree_node<P>::rebalance_right_to_left(btree_node* src, int to_move) {
+	auto cnt = count();
+	auto src_cnt = src->count();
+
+	assert(get_parent() == src->get_parent());
+	assert(position() + 1 == src->position());
+	assert(src_cnt >= cnt);
+	assert(to_move >= 1);
+	assert(to_move <= src_cnt);
+
+	// Move the delimiting value to the left node.
+	get_parent()->move_value(position(), this, cnt);
+
+	// Move the new delimiting value from the right node.
+	src->move_value(to_move - 1, get_parent(), position());
+
+	if (is_leaf()) {
+		// Move the values from the right to the left node.
+		for (int i = 1; i < to_move; ++i) {
+			src->move_value(i - 1, this, cnt + i);
+		}
+		// Shift the values in the right node to their correct position.
+		for (int i = to_move; i < src_cnt; ++i) {
+			src->move_value(i, i - to_move);
+		}
+	} else {
+		// Move the values and child pointsts from the right to the left node.
+		src->move_child(0, this, 1 + cnt);
+		for (int i = 1; i < to_move; ++i) {
+			src->move_value(i - 1, this, cnt + i);
+			src->move_child(i, this, 1 + cnt + i);
+		}
+		// Shift the values and child pointsts in the right node to their correct position.
+		for (int i = to_move; i < src_cnt; ++i) {
+			src->move_value(i, i - to_move);
+			src->move_child(i, i - to_move);
+		}
+		src->move_child(src_cnt, src_cnt - to_move);
+	}
+
+	// Fixup the counts on the src and dst nodes.
+	set_count(cnt + to_move);
+	src->set_count(src_cnt - to_move);
+}
+
+template <typename P>
+void btree_node<P>::rebalance_left_to_right(btree_node* dst, int to_move) {
+	auto cnt = count();
+	auto dst_cnt = dst->count();
+
+	assert(get_parent() == dst->get_parent());
+	assert(position() + 1 == dst->position());
+	assert(cnt >= dst_cnt);
+	assert(to_move >= 1);
+	assert(to_move <= cnt);
+
+	// Make room in the right node for the new values.
+	for (int i = dst_cnt - 1; i >= 0; --i) {
+		dst->move_value(i, i + to_move);
+	}
+
+	// Move the delimiting value to the right node.
+	get_parent()->move_value(position(), dst, to_move - 1);
+
+	// Move the new delimiting value from the left node.
+	this->move_value(cnt - to_move, get_parent(), position());
+
+	if (is_leaf()) {
+		// Move the values from the left to the right node.
+		for (int i = 1; i < to_move; ++i) {
+			move_value(cnt - to_move + i, dst, i - 1);
+		}
+	} else {
+		// Move the values and child pointers from the left to the right node.
+		for (int i = dst_cnt; i >= 0; --i) {
+			dst->move_child(i, i + to_move);
+		}
+		// Move the values and child pointers from the left to the right node.
+		for (int i = 1; i < to_move; ++i) {
+			move_value(cnt - to_move + i, dst, i - 1);
+			move_child(cnt - to_move + i, dst, i - 1);
+		}
+		move_child(cnt, dst, to_move - 1);
+	}
+
+	// Fixup the counts on the src and dst nodes.
+	set_count(cnt - to_move);
+	dst->set_count(dst_cnt + to_move);
+}
+
+template <typename P>
+void btree_node<P>::split(btree_node* dst, int insert_position) {
+	auto cnt = count();
+	auto dst_cnt = dst->count();
+
+	assert(dst_cnt == 0);
+
+	// We bias the split based on the position being inserted. If we're
+	// inserting at the beginning of the left node then bias the split to put
+	// more values on the right node. If we're inserting at the end of the
+	// right node then bias the split to put more values on the left node.
+	if (insert_position == 0) {
+		dst_cnt = cnt - 1;
+		dst->set_count(dst_cnt);
+	} else if (insert_position != max_count()) {
+		dst_cnt = cnt / 2;
+		dst->set_count(dst_cnt);
+	}
+	assert(cnt > dst_cnt);
+	cnt -= dst_cnt;
+	set_count(cnt);
+
+	if (is_leaf()) {
+		// Move values from the left sibling to the right sibling.
+		for (int i = 0; i < dst_cnt; ++i) {
+			move_value(cnt + i, dst, i);
+		}
+	} else {
+		// Move values and child pointers from the left sibling to the right sibling.
+		for (int i = 0; i < dst_cnt; ++i) {
+			move_value(cnt + i, dst, i);
+			move_child(cnt + i, dst, i);
+		}
+		move_child(cnt + dst_cnt, dst, dst_cnt);
+	}
+
+	// The split key is the largest value in the left sibling.
+	set_count(--cnt);
+	get_parent()->insert_value(position(), std::move(slot_value(cnt)));
+	destroy_value(cnt);
+	get_parent()->set_child(position() + 1, dst);
+}
+
+template <typename P>
+void btree_node<P>::merge(btree_node* src) {
+	auto cnt = count();
+	auto src_cnt = src->count();
+	auto parent = get_parent();
+	auto parent_cnt = parent->count();
+
+	assert(parent == src->get_parent());
+	assert(position() + 1 == src->position());
+
+	// Move the delimiting value to the left node.
+	parent->move_value(position(), this, cnt);
+
+	// Shift the values in the parent node to their correct position.
+	for (int i = position() + 1; i < parent_cnt; ++i) {
+		parent->move_value(i, i - 1);
+		parent->move_child(i + 1, i);
+	}
+	parent->reset_child(parent_cnt);
+
+	if (is_leaf()) {
+		// Move the values from the right to the left node.
+		for (int i = 0; i < src_cnt; ++i) {
+			src->move_value(i, this, 1 + cnt + i);
+		}
+	} else {
+		// Move the values and child pointers from the right to the left node.
+		for (int i = 0; i < src_cnt; ++i) {
+			src->move_value(i, this, 1 + cnt + i);
+			src->move_child(i, this, 1 + cnt + i);
+		}
+		src->move_child(src_cnt, this, 1 + cnt + src_cnt);
+	}
+
+	// Fixup the counts on the parent, src and dst nodes.
+	parent->set_count(parent_cnt - 1);
+	set_count(1 + cnt + src_cnt);
+	src->set_count(0);
+}
+
+template <typename P>
+void btree_node<P>::swap(btree_node* x) {
+	auto cnt = count();
+	auto x_cnt = x->count();
+
+	int min = std::min(cnt, x_cnt);
+
+	assert(is_leaf() == x->is_leaf());
+
+	if (is_leaf()) {
+		// Swap the values.
+		for (int i = 0; i < min; ++i) {
+			swap_value(i, x);
+		}
+		for (int i = min; i < x_cnt; ++i) {
+			x->move_value(i, this);
+		}
+		for (int i = min; i < cnt; ++i) {
+			move_value(i, x);
+		}
+	} else {
+		// Swap the values and child pointers.
+		for (int i = 0; i < min; ++i) {
+			swap_value(i, x);
+			swap_child(i, x);
+		}
+		swap_child(min, x);
+		for (int i = min; i < x_cnt; ++i) {
+			x->move_value(i, this);
+			x->move_child(i + 1, this);
+		}
+		for (int i = min; i < cnt; ++i) {
+			move_value(i, x);
+			move_child(i + 1, x);
+		}
+	}
+
+	// Swap the counts.
+	btree_swap_helper(fields_.count, x->fields_.count);
+}
 
 } // namespace btree
 

@@ -14,13 +14,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * btree_iterator: the iterator over node slots.
+ * btree_iterator: the iterator over node slots, with its member definitions.
  * A real header, but the pieces are meant to be used through btree/btree.h.
  */
 
 #ifndef BTREE_BTREE_ITERATOR_H__
 #define BTREE_BTREE_ITERATOR_H__
 
+#include <assert.h>
 #include <cstddef>
 #include <iterator>
 #include <type_traits>
@@ -137,6 +138,71 @@ private:
 	friend iterator;
 	friend const_iterator;
 };
+
+////
+// btree_iterator methods
+template <typename N, typename R, typename P>
+void btree_iterator<N, R, P>::increment_slow() {
+	if (node->is_leaf()) {
+		assert(position >= node->count());
+		self_type save(*this);
+		while (position == node->count() && !node->is_root()) {
+			assert(node->get_parent()->child(node->position()) == node);
+			position = node->position();
+			node = node->get_parent();
+		}
+		if (position == node->count()) {
+			*this = save;
+		}
+	} else {
+		assert(position < node->count());
+		node = node->child(position + 1);
+		while (!node->is_leaf()) {
+			node = node->child(0);
+		}
+		position = 0;
+	}
+}
+
+template <typename N, typename R, typename P>
+void btree_iterator<N, R, P>::increment_by(int count) {
+	while (count > 0) {
+		if (node->is_leaf()) {
+			int rest = node->count() - position;
+			position += std::min(rest, count);
+			count = count - rest;
+			if (position < node->count()) {
+				return;
+			}
+		} else {
+			--count;
+		}
+		increment_slow();
+	}
+}
+
+template <typename N, typename R, typename P>
+void btree_iterator<N, R, P>::decrement_slow() {
+	if (node->is_leaf()) {
+		assert(position <= -1);
+		self_type save(*this);
+		while (position < 0 && !node->is_root()) {
+			assert(node->get_parent()->child(node->position()) == node);
+			position = node->position() - 1;
+			node = node->get_parent();
+		}
+		if (position < 0) {
+			*this = save;
+		}
+	} else {
+		assert(position >= 0);
+		node = node->child(position);
+		while (!node->is_leaf()) {
+			node = node->child(node->count());
+		}
+		position = node->count() - 1;
+	}
+}
 
 } // namespace btree
 
