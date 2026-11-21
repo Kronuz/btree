@@ -15,11 +15,15 @@
  * limitations under the License.
  *
  * btree_iterator: the iterator over node slots.
- * Internal: included only by btree/btree.h.
+ * A real header, but the pieces are meant to be used through btree/btree.h.
  */
 
 #ifndef BTREE_BTREE_ITERATOR_H__
 #define BTREE_BTREE_ITERATOR_H__
+
+#include <cstddef>
+#include <iterator>
+#include <type_traits>
 
 namespace btree {
 

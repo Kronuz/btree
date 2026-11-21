@@ -15,11 +15,21 @@
  * limitations under the License.
  *
  * btree_node: the fixed-header node with trailing slots.
- * Internal: included only by btree/btree.h.
+ * A real header, but the pieces are meant to be used through btree/btree.h.
  */
 
 #ifndef BTREE_BTREE_NODE_H__
 #define BTREE_BTREE_NODE_H__
+
+#include <assert.h>
+#include <cstddef>
+#include <limits>
+#include <new>
+#include <stdexcept>
+#include <type_traits>
+#include <utility>
+
+#include "btree_params.h"
 
 namespace btree {
 

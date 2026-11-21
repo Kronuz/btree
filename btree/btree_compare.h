@@ -15,11 +15,16 @@
  * limitations under the License.
  *
  * Key comparison helpers: swap helper, key extraction tags and compare-to adapters.
- * Internal: included only by btree/btree.h.
+ * A real header, but the pieces are meant to be used through btree/btree.h.
  */
 
 #ifndef BTREE_BTREE_COMPARE_H__
 #define BTREE_BTREE_COMPARE_H__
+
+#include <functional>
+#include <string>
+#include <type_traits>
+#include <utility>
 
 namespace btree {
 

@@ -15,11 +15,18 @@
  * limitations under the License.
  *
  * Out-of-class definitions of btree modification: emplace, erase, rebalance, shrink.
- * Internal: included only by btree/btree.h.
+ * A real header, but the pieces are meant to be used through btree/btree.h.
  */
 
 #ifndef BTREE_BTREE_TREE_MODIFY_H__
 #define BTREE_BTREE_TREE_MODIFY_H__
+
+#include <assert.h>
+#include <algorithm>
+#include <utility>
+
+#include "btree_tree.h"
+#include "btree_node_impl.h"
 
 namespace btree {
 

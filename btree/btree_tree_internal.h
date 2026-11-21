@@ -15,11 +15,20 @@
  * limitations under the License.
  *
  * Out-of-class definitions of btree internals: emplacement, search, clear, dump, verify.
- * Internal: included only by btree/btree.h.
+ * A real header, but the pieces are meant to be used through btree/btree.h.
  */
 
 #ifndef BTREE_BTREE_TREE_INTERNAL_H__
 #define BTREE_BTREE_TREE_INTERNAL_H__
+
+#include <assert.h>
+#include <algorithm>
+#include <ostream>
+#include <type_traits>
+#include <utility>
+
+#include "btree_tree.h"
+#include "btree_node_impl.h"
 
 namespace btree {
 

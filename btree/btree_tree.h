@@ -15,11 +15,30 @@
  * limitations under the License.
  *
  * The btree class: tree state, public operations and internal declarations.
- * Internal: included only by btree/btree.h.
+ * A real header, but the pieces are meant to be used through btree/btree.h.
  */
 
 #ifndef BTREE_BTREE_TREE_H__
 #define BTREE_BTREE_TREE_H__
+
+#include <assert.h>
+#include <stddef.h>
+#include <sys/types.h>
+#include <cstddef>
+#include <cstdint>
+#include <iterator>
+#include <limits>
+#include <memory>
+#include <new>
+#include <ostream>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+#include "btree_compare.h"
+#include "btree_params.h"
+#include "btree_node.h"
+#include "btree_iterator.h"
 
 namespace btree {
 

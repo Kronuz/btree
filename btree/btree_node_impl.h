@@ -15,11 +15,18 @@
  * limitations under the License.
  *
  * Out-of-class definitions of btree_node and btree_iterator methods.
- * Internal: included only by btree/btree.h.
+ * A real header, but the pieces are meant to be used through btree/btree.h.
  */
 
 #ifndef BTREE_BTREE_NODE_IMPL_H__
 #define BTREE_BTREE_NODE_IMPL_H__
+
+#include <assert.h>
+#include <algorithm>
+#include <utility>
+
+#include "btree_node.h"
+#include "btree_iterator.h"
 
 namespace btree {
 

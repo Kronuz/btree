@@ -15,11 +15,22 @@
  * limitations under the License.
  *
  * Type parameter structs for sets and maps, and the node search dispatchers.
- * Internal: included only by btree/btree.h.
+ * A real header, but the pieces are meant to be used through btree/btree.h.
  */
 
 #ifndef BTREE_BTREE_PARAMS_H__
 #define BTREE_BTREE_PARAMS_H__
+
+#include <assert.h>
+#include <stddef.h>
+#include <sys/types.h>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <type_traits>
+#include <utility>
+
+#include "btree_compare.h"
 
 namespace btree {
 

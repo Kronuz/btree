@@ -15,11 +15,19 @@
  * limitations under the License.
  *
  * Container base classes shared by btree::set, map, multiset and multimap.
- * Internal: included only by btree/btree.h.
+ * A real header, but the pieces are meant to be used through btree/btree.h.
  */
 
 #ifndef BTREE_BTREE_CONTAINER_H__
 #define BTREE_BTREE_CONTAINER_H__
+
+#include <cstddef>
+#include <initializer_list>
+#include <ostream>
+#include <type_traits>
+#include <utility>
+
+#include "btree_tree.h"
 
 namespace btree {
 

@@ -1,9 +1,10 @@
 # Source layout
 
 `btree/btree.h` is the include users name. It holds the library's license and caveats and the
-standard includes, then includes the pieces below in dependency order. The pieces are internal:
-include `btree/btree.h`, `btree/map.h` or `btree/set.h`, never a piece. Each piece opens `namespace
-btree` and holds one responsibility.
+standard includes, then includes the pieces below in dependency order. Each piece is a
+self-contained header: it includes its siblings and the standard headers it uses and compiles
+alone. Users still include `btree/btree.h`, `btree/map.h` or `btree/set.h`. Each piece
+opens `namespace btree` and holds one responsibility.
 
 | File | Holds |
 |---|---|
