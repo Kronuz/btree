@@ -18,6 +18,8 @@
  * A real header, but the pieces are meant to be used through btree/btree.h.
  */
 
+// btree_node: the node layout, its fixed header and the trailing key/value/child arrays.
+
 #ifndef BTREE_BTREE_NODE_H__
 #define BTREE_BTREE_NODE_H__
 

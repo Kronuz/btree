@@ -101,6 +101,8 @@
  * BM_map_string_fwditer       243      113  +53.50%  <256>    [72.0, 55.8]
  */
 
+// btree: the umbrella header; includes the pieces and defines the public set, map, multiset and multimap.
+
 #ifndef BTREE_BTREE_H__
 #define BTREE_BTREE_H__
 

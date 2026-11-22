@@ -18,6 +18,8 @@
  * A real header, but the pieces are meant to be used through btree/btree.h.
  */
 
+// btree_compare: swap helper, key-extraction tags and compare-to adapters.
+
 #ifndef BTREE_BTREE_COMPARE_H__
 #define BTREE_BTREE_COMPARE_H__
 

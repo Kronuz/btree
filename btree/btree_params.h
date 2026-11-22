@@ -18,6 +18,8 @@
  * A real header, but the pieces are meant to be used through btree/btree.h.
  */
 
+// btree_params: the set and map parameter structs and the node search dispatchers.
+
 #ifndef BTREE_BTREE_PARAMS_H__
 #define BTREE_BTREE_PARAMS_H__
 

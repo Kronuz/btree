@@ -18,6 +18,8 @@
  * A real header, but the pieces are meant to be used through btree/btree.h.
  */
 
+// btree_iterator: the iterator over node slots.
+
 #ifndef BTREE_BTREE_ITERATOR_H__
 #define BTREE_BTREE_ITERATOR_H__
 

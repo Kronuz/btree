@@ -18,6 +18,8 @@
  * A real header, but the pieces are meant to be used through btree/btree.h.
  */
 
+// btree_tree: the btree class, its tree state, public operations and internals.
+
 #ifndef BTREE_BTREE_TREE_H__
 #define BTREE_BTREE_TREE_H__
 

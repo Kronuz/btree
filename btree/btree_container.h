@@ -18,6 +18,8 @@
  * A real header, but the pieces are meant to be used through btree/btree.h.
  */
 
+// btree_container: the container base classes shared by set, map, multiset and multimap.
+
 #ifndef BTREE_BTREE_CONTAINER_H__
 #define BTREE_BTREE_CONTAINER_H__
 
